@@ -1,0 +1,49 @@
+[tool.poetry]
+name = "caresummarygen"
+version = "0.1.0"
+description = ""
+authors = ["None"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.12,<3.13"
+accelerate = ">=0.26.0"
+bitsandbytes = "^0.44.1"
+blobfile = "^3.0.0"
+chromadb = "^0.5.20"
+filemagic = "^1.6"
+flask = "^3.1.0"
+langchain = "^0.3.7"
+langchain-chroma = "^0.1.4"
+langchain-community = "^0.3.7"
+langchain-huggingface = "^0.1.2"
+langchain-text-splitters = "^0.3.2"
+pandas = "^2.2.3"
+python-magic-bin = "^0.4.14"
+sentence-transformers = "^3.3.1"
+sentencepiece = "^0.2.0"
+tensorflow = "^2.18.0"
+tiktoken = "^0.8.0"
+torch = {version = "^2.5.1+cu124", source = "torch_cu124"}
+torchaudio = {version = "^2.5.1+cu124", source = "torch_cu124"}
+torchvision = {version = "^0.20.1+cu124", source = "torch_cu124"}
+transformers = "^4.46.3"
+unstructured = "^0.16.6"
+
+
+[[tool.poetry.source]]
+name = "torch_cu124"
+url = "https://download.pytorch.org/whl/cu124"
+priority = "explicit"
+
+
+[tool.poetry.group.dev.dependencies]
+black = "^24.10.0"
+flake8 = "^7.1.1"
+isort = "^5.13.2"
+mypy = "^1.13.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
