@@ -1,22 +1,16 @@
 ## プロジェクト概要
 
 CareSummaryGen — 医療記録（看護記録・退院サマリー等）から AI を用いて看護サマリーを自動生成するツール。
-RAG（検索拡張生成）、ファインチューニング済みモデル、Ollama ローカル LLM の3パターンに対応する。
+LLM には gpt-oss-120b（Ollama 経由）を使用する。
 
-技術スタック: Python 3.12 + Flask + LangChain + ChromaDB + HuggingFace Transformers / uv 依存管理
+技術スタック: Python 3.12 + Flask + LangChain + Ollama (gpt-oss-120b) / uv 依存管理
 
 ## 開発コマンド
 
 ```bash
 uv sync                                 # 依存インストール
-uv run python app.py                    # RAG サーバー起動 (port 5000)
-uv run python app_custom.py             # カスタムモデルサーバー起動 (port 5000)
-uv run python app_ollama.py             # Ollama サーバー起動 (port 5000)
-uv run python request.py                # RAG クライアント実行
-uv run python request_custom.py         # カスタムモデルクライアント実行
-uv run python run_ollama.py             # Ollama クライアント実行
-uv run python store_vector.py           # ChromaDB ベクトル更新
-chroma run --path ./vectorDB            # ChromaDB 起動 (port 8000)
+uv run python app.py                    # Flask サーバー起動 (port 5000)
+uv run python client.py                 # クライアント実行
 ```
 
 ## アーキテクチャ
@@ -24,37 +18,39 @@ chroma run --path ./vectorDB            # ChromaDB 起動 (port 8000)
 ```
 医療記録（XML/TXT）
   → utils/extract_data.py       # データ抽出・前処理
-  → utils/extract_summary.py    # サマリー抽出メイン処理
   → Flask サーバー (app.py)      # LLM リクエスト受信
-  → LangChain + ChromaDB         # RAG 検索（ベクトル埋め込み）
-  → HuggingFace LLM              # サマリー生成
-  → request.py                   # 結果取得
+  → Ollama (gpt-oss-120b)        # サマリー生成
+  → client.py                    # 結果取得
 ```
 
 ## ディレクトリ構造
 
 | ディレクトリ/ファイル | 役割 |
 |---|---|
-| `app.py` | RAG 対応 Flask サーバー（メイン） |
-| `app_custom.py` | カスタムファインチューニングモデル用サーバー |
-| `app_ollama.py` | Ollama 統合サーバー |
-| `request.py` / `request_custom.py` / `request_openai.py` | 各種クライアント |
-| `store_vector.py` | ChromaDB ベクトル保存 |
-| `utils/` | データ抽出・前処理・サマリー生成ユーティリティ |
-| `data/` | サンプル医療記録データ |
+| `app.py` | Flask サーバー（Ollama gpt-oss-120b 経由でサマリー生成） |
+| `client.py` | クライアント（サーバーにリクエスト送信・結果保存） |
 | `instructions_inputs.json` | 質問テンプレート設定 |
+| `utils/` | 汎用ユーティリティ（データ抽出・前処理） |
+| `data/` | サンプル医療記録データ |
+| `old/` | 旧バックエンド（RAG, カスタムモデル, OpenAI）のバックアップ（.gitignore 対象） |
 
 ## 環境変数
 
-`.env` で管理（`.gitignore` 対象）。RAG 実行には ChromaDB サーバー（port 8000）の起動が必要。
+`.env` で管理（`.gitignore` 対象）。
+
+```
+HF_TOKEN=<HuggingFace トークン>
+OLLAMA_MODEL=gpt-oss:120b
+OLLAMA_BASE_URL=http://localhost:11434
+HOSPITAL=hanwa
+```
 
 ## 主要依存ライブラリ
 
-- **LLM**: HuggingFace Transformers, Sentence Transformers, Accelerate, BitsAndBytes (4bit量子化), PEFT
-- **RAG**: LangChain, ChromaDB, LangChain Text Splitters
+- **LLM**: LangChain + Ollama (gpt-oss-120b)
 - **Web**: Flask
-- **計算**: PyTorch (CUDA 12.4), TensorFlow
-- **データ**: Pandas, Unstructured, Pydantic, Tiktoken
+- **計算**: PyTorch (CUDA 12.4)
+- **データ**: Tiktoken, Pydantic
 
 ## 開発ツール
 
