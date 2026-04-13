@@ -1,3 +1,5 @@
+import os
+
 import torch
 from torch import cuda, bfloat16
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -12,9 +14,12 @@ from langchain.chains import LLMChain
 from langchain.vectorstores import Chroma
 from langchain.prompts import PromptTemplate
 
+import dotenv
+
+dotenv.load_dotenv()
 
 MODEL_ID = "tokyotech-llm/Swallow-70b-instruct-hf"
-TOKEN = "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"
+TOKEN = os.environ.get("HF_TOKEN", "")
 
 template = """
 参考部分の情報を使って質問に回答してください。

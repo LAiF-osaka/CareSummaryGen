@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv sync:*)",
+      "Bash(uv run:*)",
+      "Bash(uv lock:*)",
+      "Bash(uv add:*)",
+      "Bash(uv pip:*)",
+      "Bash(python3:*)",
+      "Bash(python:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git status:*)",
+      "Bash(git stash:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git branch:*)",
+      "Bash(git checkout:*)",
+      "Bash(git remote:*)",
+      "Bash(gh pr:*)",
+      "Bash(gh issue:*)",
+      "Bash(chroma run:*)",
+      "Bash(lsof:*)",
+      "Bash(curl:*)",
+      "Bash(pip show:*)",
+      "Bash(black:*)",
+      "Bash(flake8:*)",
+      "Bash(mypy:*)",
+      "Bash(isort:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:docs.python.org)",
+      "WebFetch(domain:huggingface.co)",
+      "WebFetch(domain:python.langchain.com)",
+      "WebFetch(domain:flask.palletsprojects.com)",
+      "WebFetch(domain:arxiv.org)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
+    ]
+  }
+}

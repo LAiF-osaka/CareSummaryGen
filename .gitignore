@@ -1,0 +1,29 @@
+# venv
+.venv/
+
+chroma.log
+chroma_data/
+vectorDB/
+data/
+old/
+.env
+*.log
+*.Modelfile
+.DS_Store
+
+# fine-tuning
+bakeneko-32b-custom-adapter/
+finetuning/
+*.jsonl
+*.finetuning
+
+# results
+bakeneko-32b-custom-adapter-results/
+1_preprocess/
+2_llm/
+
+# medgemma
+medgemma/
+
+# DB
+vectorDB

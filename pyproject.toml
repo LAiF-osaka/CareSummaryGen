@@ -1,49 +1,50 @@
-[tool.poetry]
+[project]
 name = "caresummarygen"
 version = "0.1.0"
-description = ""
-authors = ["None"]
+description = "医療記録から看護サマリーを自動生成するツール"
 readme = "README.md"
-package-mode = false
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "accelerate>=0.26.0",
+    "bitsandbytes>=0.44.1,<0.45",
+    "blobfile>=3.0.0,<4",
+    "chromadb>=0.5.20,<0.6",
+    "compressed-tensors>=0.9.3,<0.10",
+    "filemagic>=1.6,<2",
+    "flask>=3.1.0,<4",
+    "langchain>=0.3.7,<0.4",
+    "langchain-chroma>=0.1.4,<0.2",
+    "langchain-community>=0.3.7,<0.4",
+    "langchain-huggingface>=0.1.2,<0.2",
+    "langchain-text-splitters>=0.3.2,<0.4",
+    "optimum>=1.24.0,<2",
+    "pandas>=2.2.3,<3",
+    "python-magic-bin>=0.4.14,<0.5",
+    "sentence-transformers>=3.3.1,<4",
+    "sentencepiece>=0.2.0,<0.3",
+    "tensorflow>=2.18.0,<3",
+    "tiktoken>=0.8.0,<0.9",
+    "torch>=2.5.1",
+    "torchaudio>=2.5.1",
+    "torchvision>=0.20.1",
+    "transformers>=4.46.3,<5",
+    "unstructured>=0.16.6,<0.17",
+]
 
-[tool.poetry.dependencies]
-python = ">=3.12,<3.13"
-accelerate = ">=0.26.0"
-bitsandbytes = "^0.44.1"
-blobfile = "^3.0.0"
-chromadb = "^0.5.20"
-filemagic = "^1.6"
-flask = "^3.1.0"
-langchain = "^0.3.7"
-langchain-chroma = "^0.1.4"
-langchain-community = "^0.3.7"
-langchain-huggingface = "^0.1.2"
-langchain-text-splitters = "^0.3.2"
-pandas = "^2.2.3"
-python-magic-bin = "^0.4.14"
-sentence-transformers = "^3.3.1"
-sentencepiece = "^0.2.0"
-tensorflow = "^2.18.0"
-tiktoken = "^0.8.0"
-torch = {version = "^2.5.1+cu124", source = "torch_cu124"}
-torchaudio = {version = "^2.5.1+cu124", source = "torch_cu124"}
-torchvision = {version = "^0.20.1+cu124", source = "torch_cu124"}
-transformers = "^4.46.3"
-unstructured = "^0.16.6"
+[dependency-groups]
+dev = [
+    "black>=24.10.0",
+    "flake8>=7.1.1",
+    "isort>=5.13.2",
+    "mypy>=1.13.0",
+]
 
-
-[[tool.poetry.source]]
-name = "torch_cu124"
+[[tool.uv.index]]
+name = "torch-cu124"
 url = "https://download.pytorch.org/whl/cu124"
-priority = "explicit"
+explicit = true
 
-
-[tool.poetry.group.dev.dependencies]
-black = "^24.10.0"
-flake8 = "^7.1.1"
-isort = "^5.13.2"
-mypy = "^1.13.0"
-
-[build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+[tool.uv.sources]
+torch = { index = "torch-cu124" }
+torchaudio = { index = "torch-cu124" }
+torchvision = { index = "torch-cu124" }
