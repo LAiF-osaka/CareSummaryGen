@@ -1,0 +1,38 @@
+id: hanwa
+name: 阪和病院
+description: 阪和病院の看護サマリーフォーマット
+
+sections:
+  - name: 指導した内容
+    key: instruction
+    description: 患者・家族に対して指導した内容
+    required: true
+
+  - name: 医療機器装着・挿入・処置部位
+    key: medical_equipment
+    description: 装着中の医療機器、挿入物、処置部位の情報
+    required: true
+
+  - name: 入院中の看護の経過（生活状況）
+    key: nursing_process
+    description: 入院中の看護経過と生活状況の変化（日付ごとの経過）
+    required: true
+
+  - name: 患者への病状説明及び本人・家族の受け止め方
+    key: patient_condition
+    description: 病状説明の内容と患者・家族の反応
+    required: true
+
+  - name: 継続される問題（今後のリスク）
+    key: risks
+    description: 退院後も継続する問題点と今後のリスク
+    required: true
+
+  - name: その他
+    key: others
+    description: 上記に該当しない重要事項
+    required: false
+
+section_delimiter: "--- {name} ---"
+
+examples: []

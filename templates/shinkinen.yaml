@@ -1,0 +1,18 @@
+id: shinkinen
+name: 新記念病院
+description: 新記念病院の看護サマリーフォーマット
+
+sections:
+  - name: 入院中の経過及び看護上の問題経過
+    key: progress
+    description: 日付ごとの入院経過と看護上の問題（入院時状態、治療内容、状態変化、看護ケア、退院準備）
+    required: true
+
+  - name: 備考
+    key: remarks
+    description: 退院後の注意事項、外来通院予定、利用するサービス情報
+    required: true
+
+section_delimiter: "--- {name} ---"
+
+examples: []
