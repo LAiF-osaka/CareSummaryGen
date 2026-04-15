@@ -10,15 +10,25 @@ def pytest_configure(config):
 
 
 def pytest_collection_modifyitems(config, items):
-    """Ollama 未接続時は ollama マーカー付きテストをスキップする。"""
+    """Ollama 利用不可時は ollama マーカー付きテストをスキップする。
+
+    接続確認だけでなく、設定されたモデルが利用可能かもチェックする。
+    """
     try:
         from ollama import Client
-        client = Client(host="http://localhost:11434")
-        client.list()
-    except Exception:
-        skip_ollama = pytest.mark.skip(
-            reason="Ollama サーバーに接続できません"
-        )
+        from config.settings import MODEL_NAME, OLLAMA_BASE_URL
+
+        client = Client(host=OLLAMA_BASE_URL)
+        models = client.list()
+        # ローカルモデルの場合、モデルが存在するか確認
+        model_names = [m.model for m in models.models] if models.models else []
+        has_model = any(MODEL_NAME in name for name in model_names)
+        # :cloud モデルの場合はリストに載らないので接続成功で OK
+        is_cloud = "-cloud" in MODEL_NAME or ":cloud" in MODEL_NAME
+        if not has_model and not is_cloud:
+            raise RuntimeError(f"モデル '{MODEL_NAME}' が利用できません")
+    except Exception as e:
+        skip_ollama = pytest.mark.skip(reason=f"Ollama 利用不可: {e}")
         for item in items:
             if "ollama" in item.keywords:
                 item.add_marker(skip_ollama)

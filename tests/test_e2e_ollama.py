@@ -63,7 +63,6 @@ class TestOllamaE2E:
                     "patient_id": "TEST001",
                     "template_id": "hanwa",
                 },
-                timeout=600,  # 120B モデル用の長いタイムアウト
             )
 
         assert response.status_code == 200

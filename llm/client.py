@@ -2,24 +2,54 @@
 
 Ollama Python SDK を直接使用して LLM を呼び出す。
 LangChain は使用せず、ollama パッケージのみに依存する。
-gpt-oss:120b の長い推論時間に対応するため、タイムアウトを長めに設定する。
+
+環境切替:
+    production: ローカル Ollama（http://localhost:11434）
+    test: Ollama Cloud（https://ollama.com、API キー認証）
 """
+
+import os
 
 import httpx
 from ollama import Client
 
-from config.settings import LLM_OPTIONS, MODEL_NAME, OLLAMA_BASE_URL
+from config.settings import ENV, LLM_OPTIONS, MODEL_NAME, OLLAMA_BASE_URL
+
+
+def _build_client() -> Client:
+    """環境に応じた Ollama クライアントを構築する。
+
+    テスト環境では Ollama Cloud への接続用にタイムアウトを短縮し、
+    環境変数 OLLAMA_API_KEY が設定されていれば自動的に認証ヘッダーを付与する。
+    本番環境ではローカル Ollama 向けに長めのタイムアウトを設定する。
+    """
+    if ENV == "test":
+        # テスト環境: Ollama Cloud
+        # OLLAMA_API_KEY は Ollama SDK が自動的に認証ヘッダーに付与する
+        return Client(
+            host=OLLAMA_BASE_URL,
+            timeout=httpx.Timeout(
+                connect=30.0,
+                read=300.0,  # クラウドはローカルより高速
+                write=30.0,
+                pool=30.0,
+            ),
+        )
+    else:
+        # 本番環境: ローカル Ollama
+        return Client(
+            host=OLLAMA_BASE_URL,
+            timeout=httpx.Timeout(
+                connect=30.0,
+                read=600.0,  # 120B モデルの生成待ち: 10分
+                write=30.0,
+                pool=30.0,
+            ),
+        )
+
 
 # Ollama クライアント（シングルトン）
-ollama_client = Client(
-    host=OLLAMA_BASE_URL,
-    timeout=httpx.Timeout(
-        connect=30.0,
-        read=600.0,  # 120B モデルの生成待ち: 10分
-        write=30.0,
-        pool=30.0,
-    ),
-)
+ollama_client = _build_client()
 
 
 def chat(
