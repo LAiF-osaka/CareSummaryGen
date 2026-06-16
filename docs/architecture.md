@@ -50,7 +50,7 @@
 │     ≤閾値 → single_pass → [after_single_pass] → section_worker?      │
 │     >閾値 → section_worker(Send × N)                                 │
 │   → assemble → consistency → finalize → END                         │
-│   検索: graph/search_index.py（grep 索引・カテゴリ悉皆・決定論）      │
+│   検索: graph/search_index.py（grep 索引・カテゴリ全件収集・決定論）      │
 └───────────────┬──────────────────────────────────────────────────────┘
                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -87,7 +87,7 @@
 
 ## 4. 設計上の確定事項
 
-- **検索はベクトル DB を使わない**。日付チャンク Markdown を `grep_index`（`{date, category_label, text}`）へ展開し、カテゴリ悉皆（top-k 制限なし）＋ keyword grep で収集する（決定論）。
+- **検索はベクトル DB を使わない**。日付チャンク Markdown を `grep_index`（`{date, category_label, text}`）へ展開し、カテゴリ全件収集（top-k 制限なし）＋ keyword grep で収集する（決定論）。
 - **停止条件に LLM スコアを使わない**。section_worker は「本文が空なら最大 `MAX_REFILL` 回再抽出」、`absent_categories` で記録に無いカテゴリを欠落明示。
 - **入力規模で経路を分ける**。`total_tokens ≤ SINGLE_PASS_TOKEN_THRESHOLD` は single_pass（1回生成）、超はセクション並列。
 - **テンプレートは YAML で外部化**。新機関は `templates/<id>.yaml` + `<id>.routing.yaml` の追加のみで対応（コード変更不要）。

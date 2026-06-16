@@ -119,17 +119,17 @@ DB入力（`/ingest`）との接続は [db-input-design.md](db-input-design.md) 
 - `ingest` の `_explode_to_spans` が各チャンクを **(date, category_label, span_text)** のレコード集合 `grep_index` に展開する。
 - DB renderer 経路では `CATEGORY_LABELS` の小見出し（`  - 看護記録` 等）が category アンカーになる。
 
-> **レビュー反映（R3 #2: 非DB入力対策）**: カテゴリ小見出しを出すのは DB renderer 経路（`build_context`）のみ。テキスト/XML 由来の Markdown（`data/test_sample1.md` 等、現行主入力）は `- YYYYMMDD` 境界はあるが `  - {label}` 小見出しを持たない。`_explode_to_spans` は小見出しが無いチャンクを **`category_label=None` の単一 span** として扱い、第1層（カテゴリ悉皆）ではなく第2層（keyword grep）と synthetic 経路で拾う。第1層の網羅保証は DB 経路限定であることを明示する。
+> **レビュー反映（R3 #2: 非DB入力対策）**: カテゴリ小見出しを出すのは DB renderer 経路（`build_context`）のみ。テキスト/XML 由来の Markdown（`data/test_sample1.md` 等、現行主入力）は `- YYYYMMDD` 境界はあるが `  - {label}` 小見出しを持たない。`_explode_to_spans` は小見出しが無いチャンクを **`category_label=None` の単一 span** として扱い、第1層（カテゴリ全件収集）ではなく第2層（keyword grep）と synthetic 経路で拾う。第1層の網羅保証は DB 経路限定であることを明示する。
 
 ### 3.2 検索の3層（ベクトル不使用）
 
-1. **構造検索（カテゴリ悉皆・決定論・最優先）**: routing が指定する category（enum 値）を `CATEGORY_LABELS` でラベルへ解決し、`grep_index` の該当ラベル span を**全件回収**（top-k で切らない）。これが網羅性の主担保。
+1. **構造検索（カテゴリ全件収集・決定論・最優先）**: routing が指定する category（enum 値）を `CATEGORY_LABELS` でラベルへ解決し、`grep_index` の該当ラベル span を**全件回収**（top-k で切らない）。これが網羅性の主担保。
 2. **keyword grep（補完）**: セクション description 由来のキーワード（例: 指導 → `指導|説明|教育|パンフレット`）で正規表現マッチ。カテゴリ越境・未分類（label=None）span を拾う。
 3. **synthetic セクションは全日付チャンク供給**（検索しない。§6）。
 
 > **レビュー反映（R2/R3 #1: enum↔ラベル写像）**: routing YAML には `RecordCategory` の **enum 値**を書き、`ingest` が `CATEGORY_LABELS` を介して**ラベルへ解決してから** grep する（写像の単一真実源）。enum 値で直接 grep すると `procedure`（ラベルは「処置・医療機器」）等が**全件ヒット0**になるため。§10 の契約テストで「全 routing の categories が `RecordCategory` メンバかつ `CATEGORY_LABELS` にキー存在」を必須化する。
 
-> **レビュー反映（R2: Unlabeled span の漏れ）**: 未分類（label=None）span はどのカテゴリ悉皆にも入らないため、全 extractive セクションの keyword grep 対象プールに含める。
+> **レビュー反映（R2: Unlabeled span の漏れ）**: 未分類（label=None）span はどのカテゴリ全件収集にも入らないため、全 extractive セクションの keyword grep 対象プールに含める。
 
 ### 3.3 完全性の保証（3層）
 
@@ -213,8 +213,8 @@ class ExtractResult(BaseModel):
 
 | v1 の問題 | v2 での解消 |
 |---|---|
-| evaluate→search の**グローバル再検索ループ多発** | グローバル反復を廃止。停止はカテゴリ悉皆＋決定論二段 verify |
-| `max_results=5` 取りこぼし | **悉皆回収（カテゴリ全 span）**が主経路。top-k 切り出しをしない |
+| evaluate→search の**グローバル再検索ループ多発** | グローバル反復を廃止。停止はカテゴリ全件収集＋決定論二段 verify |
+| `max_results=5` 取りこぼし | **全件回収（カテゴリ全 span）**が主経路。top-k 切り出しをしない |
 | reasoning trace 混入でパース失敗 | `think=False` + `extract_json()` + retry |
 | `plan` の JSON 不安定 | `plan` ノード自体を廃止 |
 
@@ -414,7 +414,7 @@ sections:
 
 - **契約テスト（最重要・レビュー反映 R2/R3 #1）**: 全 routing の `categories` が `RecordCategory` メンバかつ `CATEGORY_LABELS` にキー存在。`ingest` の enum→ラベル解決後に grep_index と突合してヒットすること。
 - **非DB入力テスト（R3 #2）**: 小見出しの無い `data/test_sample1.md` 等で `_explode_to_spans` が label=None フォールバックし、keyword grep / synthetic でカバレッジが破綻しないこと。
-- **ユニット**: `_collect` カテゴリ悉皆（取りこぼし0）、`verify` 二段（evidence/body）、内部ループ終了（充足/上限/ハッシュ不変）、`assemble` 欠損明示、`global_repair_count` の並列加算。
+- **ユニット**: `_collect` カテゴリ全件収集（取りこぼし0）、`verify` 二段（evidence/body）、内部ループ終了（充足/上限/ハッシュ不変）、`assemble` 欠損明示、`global_repair_count` の並列加算。
 - **E2E（mocked LLM）**: hanwa 6 / shinkinen 2 セクション全出力、空セクションが「記録なし（要確認）」、review_flags 起動、single-pass（≤TH）と fanout（>TH）の両経路。
 - **E2E（real Ollama）**: `think=False`+format で extract が JSON パース成功（reasoning 混入で失敗しない）。Cloud で format 非強制でも `extract_json()`+retry で復旧。
 - **回帰**: `data/test_sample1.md` 等で v1 と v2 の出力を並置し、カテゴリ取りこぼしが v2 で減ること。
@@ -427,7 +427,7 @@ sections:
 | # | リスク | 対応方針 |
 |---|---|---|
 | 1 | grep の網羅保証は **enum→ラベル写像の正しさに依存**（誤れば全件0ヒット） | ingest で単一写像、契約テスト必須 |
-| 2 | 第1層カテゴリ悉皆は **DB renderer 経路限定**。非DB入力では keyword/synthetic 依存 | label=None フォールバック、非DB入力テスト |
+| 2 | 第1層カテゴリ全件収集は **DB renderer 経路限定**。非DB入力では keyword/synthetic 依存 | label=None フォールバック、非DB入力テスト |
 | 3 | `required_items` 空でも機能させるため verify を **evidence/body 二段**に再定義 | §4.1 |
 | 4 | 単一 Ollama では `Send` 並列が直列化されレイテンシ改善しない | ≤TH は single-pass を既定、並列効果は構造独立性に限定 |
 | 5 | synthetic の完全性は date カバレッジ検査のみ（refine で情報脱落しうる） | date 単位カバレッジ検査＋フラグ化 |

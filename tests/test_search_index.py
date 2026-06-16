@@ -37,7 +37,7 @@ def test_explode_non_db_chunk_label_none():
 
 
 def test_collect_extractive_category_exhaustive():
-    """extractive: カテゴリ悉皆で全該当スパンを収集すること。"""
+    """extractive: カテゴリ全件収集で全該当スパンを収集すること。"""
     chunks, index = _db_chunks()
     spans = explode_to_spans(chunks, index)
     entry = {

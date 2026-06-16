@@ -1,7 +1,7 @@
 """grep 索引と決定論的な収集・検証ヘルパ（v2 agentic search）。
 
 日付チャンク Markdown を (date, category_label, text) のスパン集合へ展開し、
-セクションの routing 定義に基づいてカテゴリ悉皆＋keyword grep で収集する。
+セクションの routing 定義に基づいてカテゴリ全件収集＋keyword grep で収集する。
 ベクトル検索は使わない。LLM も使わない（決定論）。
 
 詳細設計: docs/agentic-search-redesign.md §3, §4 を参照。
@@ -84,7 +84,7 @@ def collect(
 ) -> tuple[list[str], set[str], list[str]]:
     """セクションの routing に基づき evidence を収集する（決定論）。
 
-    synthetic は全日付チャンクを供給する。extractive はカテゴリ悉皆
+    synthetic は全日付チャンクを供給する。extractive はカテゴリ全件収集
     （top-k 制限なし）＋ keyword grep（label=None スパンも対象）。
 
     Args:
@@ -109,7 +109,7 @@ def collect(
     present: set[str] = set()
     dates: set[str] = set()
 
-    # カテゴリ悉皆（該当ラベルの span を全件回収）
+    # カテゴリ全件収集（該当ラベルの span を全件回収）
     for span in grep_index:
         if span["category_label"] in target_labels:
             texts.append(span["text"])
