@@ -1,170 +1,156 @@
 # データフロー仕様: 入力 → 処理 → 出力（v2）
 
-本書は CareSummaryGen の `POST /ask`（テキスト入力）と `POST /ingest`（DB入力）における
-入力データ・処理フロー・出力データを、実装上の関数名・State フィールド名・ノード名に対応づけて記述する。
+本書は CareSummaryGen の入力データ・処理フロー・出力データを、実装上の関数名・State フィールド名・ノード名に対応づけて記述する。
 
-構成: LangGraph + Ollama Python SDK + FastAPI / agentic search v2（入力規模ルーティング）。
+構成: LangGraph + Ollama Python SDK + FastAPI / agentic search v2。
 詳細設計: [agentic-search-redesign.md](agentic-search-redesign.md)（処理）、[db-input-design.md](db-input-design.md)（DB入力）。
+図解版: [data-flow-report.html](data-flow-report.html)。
 
 ---
 
 ## 1. 入力
 
-入力経路は2つある。どちらも最終的に同一の `_run_graph(context, patient_id, template_id)`（`app.py`）へ収束する。
+入力経路は2つある。**本番の主経路はデータベースからの取得（`POST /ingest`）**であり、テキスト入力（`POST /ask`）は同形式の `context` を直接渡す代替経路である。どちらも `_run_graph(context, patient_id, template_id)`（`app.py`）に収束する。
 
-### 1.1 POST /ask（テキスト入力）
+### 1.1 主経路: POST /ingest（DBから各項目を取得）
 
-- 定義: `app.py` の `AskRequest`
-
-| フィールド | 型 | 必須 | デフォルト | 説明 |
-|---|---|---|---|---|
-| `context` | `str` | 必須 | なし | 医療記録テキスト（日付チャンク Markdown） |
-| `patient_id` | `str` | 任意 | `"unknown"` | 患者ID |
-| `template_id` | `str \| None` | 任意 | `None` | `None` のとき環境変数 `HOSPITAL`（既定 `hanwa`） |
-
-### 1.2 POST /ingest（DB入力）
-
-- 定義: `app.py` の `IngestRequest`
+`IngestRequest`（`app.py`）で患者ID・入院ID・取得仕様IDを受け取り、`build_context_from_db()`（`adapters/pipeline.py`）が **`query_spec` で定義された各テーブル・各カラム（項目）を SQL で取得**して `context` を構築する。
 
 | フィールド | 型 | 必須 | デフォルト | 説明 |
 |---|---|---|---|---|
 | `patient_id` | `str` | 必須 | なし | 患者ID（正規表現 `[A-Za-z0-9_-]+` で検証） |
 | `encounter_id` | `str` | 必須 | なし | 入院ID（同上） |
-| `query_spec_id` | `str` | 任意 | `"sql_sample"` | `query_specs/<id>.yaml` |
-| `template_id` | `str \| None` | 任意 | `None` | 省略時 `HOSPITAL` |
+| `query_spec_id` | `str` | 任意 | `"sql_sample"` | 取得仕様（`query_specs/<id>.yaml`） |
+| `template_id` | `str \| None` | 任意 | `None` | 省略時 `HOSPITAL`（既定 `hanwa`） |
 
-`/ingest` は `build_context_from_db(patient_id, encounter_id, query_spec_id)`（`adapters/pipeline.py`）で
-DB から context を構築してから `_run_graph` に渡す（§4）。
+#### 取得される各項目（`query_specs/sql_sample.yaml` の例）
+
+`query_spec` は「どのテーブルのどのカラムを、どの意味役割（`role`）で取得するか」を定義する。各カラムが `role` を通じて `ClinicalRecord` のフィールドへ写像される。**カラム名が未確定でも、`query_spec` の追加・修正のみで取得項目を変えられる（コード変更不要）。**
+
+| DBテーブル | 取得カラム | role | → ClinicalRecord フィールド | 寄与セクション |
+|---|---|---|---|---|
+| `vital_signs` | `measured_at` | datetime | レコードの日付（`event_date`） | — |
+| | `item_code` | item(codesystem=medis_obs) | フィールド名（コード→名称解決。例 `31001368`→`体温`） | nursing_process, medical_equipment |
+| | `value` | value | フィールド値 | |
+| | `unit` | unit | フィールド単位 | |
+| | `recorder_name` | recorder | 記録者 | |
+| `nursing_records` | `recorded_at` | datetime | レコードの日付 | nursing_process, patient_condition, instruction |
+| | `soap_s` / `soap_o` / `soap_a` / `soap_p` | text | 自由記述フィールド（S(主観)/O(客観)/A(評価)/P(計画)） | |
+| | `recorder_name` | recorder | 記録者 | |
+| `infections` | `name` | item(label=感染症) | フィールド `感染症: <値>`（患者横断＝サマリヘッダ行き） | risks |
+| | `detail` | text | フィールド `内容: <値>` | |
+
+`role` の語彙: `datetime`（日付軸）/ `item`（項目名・コード解決可）/ `value`（値）/ `unit`（単位）/ `text`（自由記述）/ `recorder`（記録者）/ `subtype`（区分・転帰）/ `phi`（個人識別情報＝出力除外）/ `id`・`link`（結合キー＝非出力）。
+
+### 1.2 代替経路: POST /ask（整形済みテキスト）
+
+`AskRequest`（`app.py`）で日付チャンク Markdown を直接渡す。前処理済みファイルや動作確認に使う。
+
+| フィールド | 型 | 必須 | デフォルト | 説明 |
+|---|---|---|---|---|
+| `context` | `str` | 必須 | なし | `min_length=1`。医療記録テキスト（日付チャンク Markdown） |
+| `patient_id` | `str` | 任意 | `"unknown"` | 患者ID |
+| `template_id` | `str \| None` | 任意 | `None` | 省略時 `HOSPITAL` |
 
 ### 1.3 context のテキスト形式（両経路共通の契約）
 
-`ingest` ノード（`graph/nodes/ingest.py`）の `_build_search_index()` は、正規表現 `^- (\d{8})\s*$`
-（行頭の `- YYYYMMDD`）をチャンク境界として分割する。最初の日付行より前の本文は `_extract_summary_header()`
-が `summary_header` として抽出する（`# 患者ID:` 行は除外）。`explode_to_spans()` が各日付チャンクを
-`  - {カテゴリ名}` 小見出し単位の `grep_index`（`{date, category_label, text}`）へ展開する。小見出しが
-無いチャンクは `category_label=None` の単一スパンになる。
+`context` は `# 患者ID:` ＋ `## サマリ基本情報`（患者横断情報）＋ `- YYYYMMDD` 日付チャンクからなる Markdown。`ingest` ノードがこれを `chunks` / `grep_index` / `summary_header` に分解する（§3.2）。
+
+```
+# 患者ID: P1
+
+## サマリ基本情報（全期間共通）
+- 感染症
+    感染症: MRSA 陽性
+    内容: 接触予防継続
+
+- 20230209
+  - バイタルサイン
+    体温: 37.8℃
+    SpO2: 94%
+    （記録者: 看護師A）
+  - 看護記録
+    S(主観):
+      息苦しい
+```
 
 ---
 
-## 2. 処理フロー（LangGraph v2）
+## 2. DB入力パイプライン（各項目 → context）
 
-`_run_graph` が `GlobalState`（`graph/state.py`）初期値を構築し、`build_nursing_summary_graph()`
-（`graph/builder.py`）でコンパイルしたグラフを `invoke` する。
+`build_context_from_db(patient_id, encounter_id, spec_id)`（`adapters/pipeline.py`）が各段を順に実行する。
+
+| 順 | 段 | ファイル | 処理 |
+|---|---|---|---|
+| 1 | ロード・検証 | `query_specs_loader/loader.py` | `query_spec` を Pydantic 検証。`record_category` が `RecordCategory` メンバか、`retrieval.sql` のバインド変数が `:patient_id` / `:encounter_id` のみかを検査 |
+| 2 | 取得 | `adapters/sql_source.py` | `get_adapter("sql")` で取得アダプタを生成し、各 `record` の SQL を `:patient_id` / `:encounter_id` バインドで実行。`{record_category: [行]}` を返す |
+| 3 | 正規化 | `adapters/normalizer.py` | 各行の各カラムを `role` で `ClinicalRecord` フィールドへ写像。`role=item`+`codesystem` はコード→名称解決（未解決は `[未解決コード:...]`）。患者横断カテゴリ（`allergy`/`infection`/`nursing_problem`/`patient_profile`/`nursing_acuity`）は `cross_cutting=True`。取得0件カテゴリは `missing_categories` |
+| 4 | サンプリング | `adapters/sampler.py` | `sampling.strategy=extremes` のカテゴリを項目ごとに first/last（日付）＋ min/max（数値）へ間引く |
+| 5 | PHIマスク | `adapters/phi_masker.py` | 自由記述（`is_text`）の電話番号・郵便番号・メール等を非可逆マスク。`role=phi` 列は段3で既に除外 |
+| 6 | Markdown化 | `adapters/markdown_renderer.py` | `# 患者ID:` ＋ サマリヘッダ（cross_cutting・欠損）＋ `- YYYYMMDD` 日付チャンクへ直列化。擬似日付 `00000000` は使わない |
+
+出力 `context` は `AskRequest.context` と同形式であり、以降の処理（§3）は両経路共通。
+
+---
+
+## 3. 処理フロー（LangGraph v2）
+
+`_run_graph` が `GlobalState`（`graph/state.py`）初期値を構築し、`build_nursing_summary_graph()`（`graph/builder.py`）でコンパイルしたグラフを `invoke` する。
 
 ```
 START
   → ingest
-  → [route_and_fanout]  ── 総トークン total_tokens で分岐
+  → [route_and_fanout]  ── total_tokens で分岐
        ≤ SINGLE_PASS_TOKEN_THRESHOLD(既定32768) → single_pass
        > 閾値                                   → section_worker(Send × セクション数)
   single_pass
-  → [after_single_pass]  ── 本文が空のセクションのみ section_worker へ Send、無ければ assemble
-       → section_worker(Send × 欠損数)
-       → assemble
+  → [after_single_pass]  ── 本文が空のセクションのみ section_worker、無ければ assemble
   section_worker  ──(reducer merge_sections で section_results 集約)──→ assemble
   assemble → consistency → finalize → END
 ```
 
-### 2.1 ノード別仕様
+### 3.1 ノード別仕様
 
-| ノード | ファイル | LLM 呼出 | 主な入力 | 主な出力 |
-|---|---|---|---|---|
-| `ingest` | `graph/nodes/ingest.py` | なし | `raw_context`, `template_id` | `template`, `routing`, `summary_header`, `chunks`, `grep_index`, `total_tokens` |
-| `single_pass` | `graph/nodes/single_pass.py` | あり（1回） | `chunks`, `summary_header`, `template` | `section_results`（全セクション） |
-| `section_worker` | `graph/nodes/section_worker.py` | あり | Send ペイロード（section, routing_entry, grep_index, chunks, summary_header） | `section_results`（1セクション） |
-| `assemble` | `graph/nodes/assemble.py` | なし | `section_results`, `template` | `draft_summary` |
-| `consistency` | `graph/nodes/consistency.py` | あり（claim分解のみ） | `draft_summary`, `grep_index` | `review_flags`（未支持claim） |
-| `finalize` | `graph/nodes/finalize.py` | なし | `draft_summary`, `section_results` | `final_summary`, `review_flags` |
+| ノード | ファイル | LLM | 主な出力 |
+|---|---|---|---|
+| `ingest` | `graph/nodes/ingest.py` | なし | `template`, `routing`, `summary_header`, `chunks`, `grep_index`, `total_tokens` |
+| `single_pass` | `graph/nodes/single_pass.py` | あり（1回） | `section_results`（全セクション） |
+| `section_worker` | `graph/nodes/section_worker.py` | あり | `section_results`（1セクション） |
+| `assemble` | `graph/nodes/assemble.py` | なし | `draft_summary` |
+| `consistency` | `graph/nodes/consistency.py` | あり（claim分解のみ） | `review_flags`（未支持claim） |
+| `finalize` | `graph/nodes/finalize.py` | なし | `final_summary`, `review_flags` |
 
-### 2.2 各ノードの処理内容
+### 3.2 処理内容（要点）
 
-#### ingest
-- `load_template(template_id)` / `load_routing(template_id)` をロード（routing の `categories` は `RecordCategory` の enum 値、`CATEGORY_LABELS` でラベル解決可能であることが検証済み）。
-- `_extract_summary_header()` で患者横断情報を `summary_header` に抽出（検索ヒットに依存せず常時供給）。
-- `_build_search_index()` で日付チャンク `chunks`/`chunk_index` を生成。
-- `explode_to_spans()` で `grep_index`（`{date, category_label, text}`）を構築。
-- `tiktoken`（cl100k_base）で `total_tokens` を算出。
+- `ingest`: `load_template` / `load_routing`、`_extract_summary_header` で `summary_header`、`_build_search_index` で `chunks`、`explode_to_spans` で `grep_index`（`{date, category_label, text}`）、`tiktoken` で `total_tokens`。
+- `route_and_fanout`（`graph/edges/routing_v2.py`）: `total_tokens ≤ 閾値` → `single_pass`、超 → 全セクションを `Send` で並列。
+- `single_pass`: 全セクション + `summary_header` + 全 `chunks` を1プロンプトで `chat_json`（`think=False`, `num_ctx=LARGE_NUM_CTX`）。
+- `section_worker`: `collect`（カテゴリ悉皆・top-k 制限なし＋ keyword grep）→ `_extract`（`chat_json`）→ 本文が空なら最大 `MAX_REFILL` 回再試行（**LLM スコア不使用**）。`absent_categories` で記録に無いカテゴリを欠落明示。
+- `assemble`: `section_delimiter`（`--- {name} ---`）で決定論組立。空は `"記録なし（要確認）"`。
+- `consistency`: `chat_json` で claim 分解→主要トークンの過半が `grep_index`＋`summary_header` に含まれるか決定論照合。未支持を `review_flags`（自動修復しない）。
+- `finalize`: `final_summary = draft_summary`、`review_flag` 立ちセクションを集約。
 
-#### route_and_fanout（条件付きエッジ・`graph/edges/routing_v2.py`）
-- `total_tokens <= SINGLE_PASS_TOKEN_THRESHOLD` → `"single_pass"`。
-- それ以外 → 全セクションを `Send("section_worker", payload)` で並列起動。
+### 3.3 LLM 呼び出し（`llm/client.py`）
 
-#### single_pass
-- 全セクション仕様 + `summary_header` + 全 `chunks` を1プロンプトに入れ、`chat_json`（`format` + `extract_json` + bounded retry、`think=False`、`num_ctx=LARGE_NUM_CTX`）で `{sections: [{section_key, body, cited_dates}]}` を取得。
-- 各テンプレートセクションに `SectionResult` を生成。本文が空のセクションは `review_flag=True`。
-
-#### after_single_pass（条件付きエッジ）
-- 本文が空のセクションがあれば、それらだけ `Send("section_worker", ...)`。無ければ `"assemble"`。
-
-#### section_worker（単一ノード・Send で起動）
-- `collect(entry, grep_index, chunks)`（`graph/search_index.py`）: synthetic は全日付チャンク供給、extractive はカテゴリ悉皆（top-k 制限なし）＋ keyword grep（label=None スパンも対象）。
-- `_extract()`: `SECTION_EXTRACT_PROMPT` + `chat_json`（`{reasoning, body, cited_dates}`）。本文が空なら最大 `MAX_REFILL+1` 回まで再試行（決定論カウンタ。LLM スコア不使用）。
-- `absent_categories(entry, present_labels)`: routing が要求するが記録に存在しないカテゴリラベルを欠落として返す。欠落があれば `review_flag`。
-- `{section_key: SectionResult}` を返し、reducer `merge_sections` が `section_results` に集約。
-
-#### assemble
-- `section_delimiter`（既定 `--- {name} ---`）でテンプレート順に決定論組立。空・未生成セクションは `"記録なし（要確認）"`。LLM 不使用。
-
-#### consistency
-- `CONSISTENCY_PROMPT` + `chat_json` で `{claims: [...]}` を分解。
-- 各 claim の主要トークン（数値・語）が `grep_index`＋`summary_header` に過半含まれるかを決定論照合。未支持 claim を `review_flags` に追加（自動修復しない）。
-
-#### finalize
-- `final_summary = draft_summary`。`review_flag` が立った `section_key` を `review_flags` に集約。
-
-### 2.3 LLM 呼び出し（`llm/client.py`）
-- `chat(prompt, format_schema, temperature, think=False, options_override)`: `think=False` で reasoning 混入を防ぎ、`options_override` で `num_ctx` をノード単位上書き。
-- `chat_json(prompt, schema, max_retries=3)`: `chat` + `extract_json`（コードフェンス除去・平衡括弧抽出）+ retry。Ollama Cloud で `format` 非強制でも復旧。
-- モデル/接続先は `ENV` で切替（production=ローカル `gpt-oss:120b`、test=`gpt-oss:120b-cloud`）。
-
-### 2.4 ループ上限（決定論カウンタ）
-
-| ループ | 制御 | 上限 |
-|---|---|---|
-| section_worker 内部の再抽出 | `MAX_REFILL`（既定1） | 本文が空のときのみ再試行 |
-| single_pass の欠損補完 | after_single_pass | 欠損セクションを1回だけ section_worker へ |
-
-LLM スコア（0–1）や「SUFFICIENT」LLM 判定は停止条件に**使わない**。
+- `chat(prompt, format_schema, temperature, think=False, options_override)`: `think=False` で reasoning 混入防止、`options_override` で `num_ctx` 上書き。
+- `chat_json(prompt, schema, max_retries=3)`: `chat` + `extract_json`（コードフェンス除去・平衡括弧抽出）+ retry。
+- モデル/接続先は `ENV` 切替（production=ローカル `gpt-oss:120b`、test=`gpt-oss:120b-cloud`）。
 
 ---
 
-## 3. 出力
-
-- 定義: `app.py` の `AskResponse`（`/ask`・`/ingest` 共通）
+## 4. 出力（`app.py`: AskResponse）
 
 | フィールド | 型 | 説明 |
 |---|---|---|
-| `answer` | `str` | `final_summary`。テンプレート区切りの看護サマリー |
+| `answer` | `str` | `final_summary`。`section_delimiter` 区切りの看護サマリー |
 | `template_id` | `str` | 使用テンプレートID |
 | `review_flags` | `list[str]` | 人手レビュー対象（欠落セクションキー・未支持 claim） |
 
-`answer` はテンプレート（`templates/<id>.yaml`）の `section_delimiter` で区切られる。
-`hanwa` は6セクション、`shinkinen` は2セクション。
+`answer` はテンプレート（`templates/<id>.yaml`）の `section_delimiter` で区切られる。`hanwa` は6セクション、`shinkinen` は2セクション。
 
 ---
 
-## 4. DB入力パイプライン（/ingest 経路）
-
-`build_context_from_db(patient_id, encounter_id, spec_id)`（`adapters/pipeline.py`）:
-
-```
-load_query_spec(spec_id)             # query_specs_loader: Pydantic検証 + バインド変数検証
-  → get_adapter(source_type).fetch() # adapters/base 登録の RecordSourceAdapter（sql 等）
-  → normalize(raw, spec, ...)        # adapters/normalizer: role別マッピング + コード解決 + cross_cutting
-  → sample(record_set, spec)         # adapters/sampler: extremes(first/last/min/max)
-  → mask(record_set)                 # adapters/phi_masker: 自由記述の電話/郵便/メール等を非可逆マスク
-  → render(record_set)               # adapters/markdown_renderer: # 患者ID + サマリヘッダ + - YYYYMMDD
-  → context（= AskRequest.context と同形式）
-```
-
-- `query_spec` は「論理層（record_category / columns(role) / contributes_to / sampling）」と「retrieval層（source_type 固有: `sql`）」に分離。
-- `retrieval.sql` のバインド変数は `:patient_id` / `:encounter_id` のみ許可（ローダーで検証、SQLインジェクション防止）。
-- `role=item` かつ `codesystem` 指定の列はコード→名称解決（例: `31001368` → `体温`）。未解決は `[未解決コード:...]`。
-- 患者横断カテゴリ（`allergy`, `infection`, `nursing_problem`, `patient_profile`, `nursing_acuity`）は `cross_cutting=True` でサマリヘッダ領域へ。
-
----
-
-## 5. GlobalState フィールド一覧（`graph/state.py`）
+## 5. GlobalState（`graph/state.py`）
 
 | フィールド | 型 | 用途 |
 |---|---|---|
