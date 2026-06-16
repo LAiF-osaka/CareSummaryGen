@@ -23,6 +23,11 @@ def synthesize(state: NursingSummaryState) -> dict:
 
     section_data = "\n\n".join(section_data_parts)
 
+    # サマリヘッダ（患者横断情報）は検索ヒットに依存せず常時供給する。
+    summary_header = state.get("summary_header", "")
+    if summary_header:
+        section_data = f"### 患者横断情報（全期間共通）\n{summary_header}\n\n{section_data}"
+
     prompt = SYNTHESIZE_PROMPT.format(
         format_instruction=format_instruction,
         section_data=section_data,

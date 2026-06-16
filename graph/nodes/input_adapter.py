@@ -36,12 +36,17 @@ def input_adapter(state: NursingSummaryState) -> dict:
         for section in template["sections"]
     ]
 
+    # サマリヘッダ（最初の日付行より前の患者横断情報）を抽出し常時供給する。
+    # 既存の日付分割では破棄される領域のため、別途 state に保持する。
+    summary_header = _extract_summary_header(state["raw_context"])
+
     # 日付単位でチャンク分割
     chunks, chunk_index = _build_search_index(state["raw_context"])
 
     return {
         "template": template,
         "search_plan": search_plan,
+        "summary_header": summary_header,
         "chunks": chunks,
         "chunk_index": chunk_index,
         "current_section_idx": 0,
@@ -49,6 +54,30 @@ def input_adapter(state: NursingSummaryState) -> dict:
         "section_results": {},
         "_search_results": [],
     }
+
+
+def _extract_summary_header(text: str) -> str:
+    """最初の `- YYYYMMDD` 日付行より前の本文をサマリヘッダとして抽出する。
+
+    `# 患者ID:` ヘッダ行は除外し、`## サマリ基本情報` 等の患者横断情報のみを
+    返す。日付行が無い、または前置領域が無い場合は空文字を返す。
+
+    Args:
+        text: 入力医療記録テキスト。
+
+    Returns:
+        サマリヘッダ本文（無ければ空文字）。
+    """
+    date_match = re.search(r"^- \d{8}\s*$", text, re.MULTILINE)
+    preamble = text[: date_match.start()] if date_match else text
+
+    # `# 患者ID:` 見出し行を除外し、残りを本文とする
+    body_lines = [
+        line
+        for line in preamble.splitlines()
+        if not line.lstrip().startswith("# ")
+    ]
+    return "\n".join(body_lines).strip()
 
 
 def _build_search_index(text: str) -> tuple[list[str], list[dict]]:

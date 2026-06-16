@@ -5,7 +5,7 @@ LLM 呼び出しをモックして各ノードの連携と状態遷移を確認�
 """
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,13 +15,12 @@ from tests.conftest import SAMPLE_MEDICAL_RECORD
 
 # --- LLM モックレスポンス ---
 
+
 def _mock_chat(prompt, *, system="", format_schema=None, temperature=None):
     """llm.client.chat のモック。
 
     プロンプト内容に応じて適切なモックレスポンスを返す。
     """
-    prompt_lower = prompt.lower() if prompt else ""
-
     # plan ノード: 検索クエリを JSON で返す
     if format_schema and "queries" in str(format_schema):
         return json.dumps({
@@ -85,8 +84,10 @@ def mock_llm():
     """LLM 呼び出しをモックするフィクスチャ。"""
     with (
         patch("graph.nodes.plan.chat", side_effect=_mock_chat),
-        patch("graph.nodes.search.chat", side_effect=_mock_chat),
-        patch("graph.nodes.search.chat_with_tools", side_effect=_mock_chat_with_tools),
+        patch(
+            "graph.nodes.search.chat_with_tools",
+            side_effect=_mock_chat_with_tools,
+        ),
         patch("graph.nodes.extract.chat", side_effect=_mock_chat),
         patch("graph.nodes.evaluate.chat", side_effect=_mock_chat),
         patch("graph.nodes.synthesize.chat", side_effect=_mock_chat),

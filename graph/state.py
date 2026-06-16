@@ -34,6 +34,9 @@ class NursingSummaryState(TypedDict):
     chunks: list[str]
     chunk_index: list[dict]
 
+    # --- サマリヘッダ（日付に紐づかない患者横断情報・常時供給） ---
+    summary_header: str
+
     # --- テンプレート ---
     template_id: str
     template: dict

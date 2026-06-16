@@ -7,7 +7,6 @@ LangGraph + Ollama SDK + FastAPI による Agentic Search パイプライン。
     uv run uvicorn app:app --reload --port 5000
 """
 
-import os
 import traceback
 from contextlib import asynccontextmanager
 
@@ -118,6 +117,7 @@ async def ask(req: AskRequest) -> AskResponse:
         "hospital": HOSPITAL,
         "chunks": [],
         "chunk_index": [],
+        "summary_header": "",
         "template_id": template_id,
         "template": {},
         "search_plan": [],

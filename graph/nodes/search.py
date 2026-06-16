@@ -8,11 +8,11 @@ gpt-oss:120b の tool calling が不安定な場合のフォールバックも�
 import json
 
 from graph.state import NursingSummaryState
-from llm.client import chat, chat_with_tools
+from llm.client import chat_with_tools
 from llm.prompts import SEARCH_PROMPT
 
-
 # --- 検索ツール定義 ---
+
 
 def search_by_keyword(keyword: str) -> list[str]:
     """キーワードで医療記録チャンクを検索する。
@@ -41,7 +41,8 @@ def search_by_date_range(start_date: str, end_date: str) -> list[str]:
 
 
 def _execute_keyword_search(
-    keyword: str, chunks: list[str],
+    keyword: str,
+    chunks: list[str],
 ) -> list[str]:
     """キーワード検索の実行。"""
     keyword_lower = keyword.lower()
@@ -92,7 +93,9 @@ def search(state: NursingSummaryState) -> dict:
     chunk_index = state["chunk_index"]
 
     # 日付範囲の取得
-    dates = sorted(set(c.get("date", "") for c in chunk_index if c.get("date")))
+    dates = sorted(
+        set(c.get("date", "") for c in chunk_index if c.get("date"))
+    )
     date_range = f"{dates[0]}〜{dates[-1]}" if dates else "不明"
 
     results = []
@@ -117,7 +120,10 @@ def search(state: NursingSummaryState) -> dict:
                 if isinstance(fn_args, str):
                     fn_args = json.loads(fn_args)
                 tool_results = _execute_tool_call(
-                    fn_name, fn_args, chunks, chunk_index,
+                    fn_name,
+                    fn_args,
+                    chunks,
+                    chunk_index,
                 )
                 results.extend(tool_results)
     except Exception:
