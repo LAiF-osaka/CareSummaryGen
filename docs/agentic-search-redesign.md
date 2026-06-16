@@ -8,7 +8,25 @@
 臨床文書のセクション抽出に関する4観点のWeb調査、および3観点（gpt-oss信頼性/完全性・効率/LangGraph統合）の
 設計レビュー（Critical 指摘を反映）に基づく。比喩・平易化・抽象化は用いない。
 
-本設計は `GRAPH_VERSION=v2` フラグ下の新経路として実装し、現行（v1）は当面残置する（後方互換）。
+---
+
+## 実装状況（2026-04 時点）
+
+**本設計は実装済み**。v1（`plan/search/extract/evaluate/reflect/revise/synthesize`）は削除した（残置しない）。
+実装は本設計に準拠するが、以下の点を実装上の確定として補足する。実行時フローの最新は
+[data-flow.md](data-flow.md) を正とする。
+
+| 設計上の記述 | 実装での確定 |
+|---|---|
+| State `state_v2.py` 等の別ファイル | `graph/state.py` を `GlobalState` / `SectionResult` に置換（別ファイルにしない） |
+| `nodes_v2/` | `graph/nodes/{ingest,single_pass,section_worker,assemble,consistency,finalize}.py` |
+| `templates_loader/routing.py` | 実装済み（`load_routing` + `resolve_category_labels`、契約検証あり） |
+| `chat()` 変更（think + options_override） | 実装済み。加えて `chat_json()`（format + extract_json + retry）を追加 |
+| verify の二段（evidence/body） | section_worker では「本文が空なら最大 `MAX_REFILL` 回再抽出」＋ `absent_categories`（記録に無いカテゴリを欠落明示）に集約。`required_items` は未使用（空でも機能） |
+| `GRAPH_VERSION=v2` フラグ・v1 残置 | フラグは設けず v1 を削除（ユーザー方針: 残置しない） |
+| consistency の claim 照合 | 主要トークンの過半一致による決定論照合。自動修復せず `review_flags` に記録 |
+
+DB入力（`/ingest`）との接続は [db-input-design.md](db-input-design.md) を参照。
 
 ---
 

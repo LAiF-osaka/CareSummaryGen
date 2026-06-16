@@ -1,259 +1,182 @@
-# データフロー仕様: 入力 → 処理 → 出力
+# データフロー仕様: 入力 → 処理 → 出力（v2）
 
-本書は CareSummaryGen の `POST /ask` における入力データ、処理フロー、出力データを、
-実装上の関数名・State フィールド名・プロンプト名に対応づけて記述する。
+本書は CareSummaryGen の `POST /ask`（テキスト入力）と `POST /ingest`（DB入力）における
+入力データ・処理フロー・出力データを、実装上の関数名・State フィールド名・ノード名に対応づけて記述する。
 
-対象コミット時点の構成: LangGraph + Ollama Python SDK + FastAPI / Agentic Search パイプライン。
+構成: LangGraph + Ollama Python SDK + FastAPI / agentic search v2（入力規模ルーティング）。
+詳細設計: [agentic-search-redesign.md](agentic-search-redesign.md)（処理）、[db-input-design.md](db-input-design.md)（DB入力）。
 
 ---
 
 ## 1. 入力
 
-### 1.1 HTTP リクエスト
+入力経路は2つある。どちらも最終的に同一の `_run_graph(context, patient_id, template_id)`（`app.py`）へ収束する。
 
-- メソッド: `POST`
-- パス: `/ask`
-- Content-Type: `application/json`
-- 定義: `app.py` の `AskRequest`（Pydantic モデル）
+### 1.1 POST /ask（テキスト入力）
 
-| フィールド | 型 | 必須 | デフォルト | 制約・説明 |
+- 定義: `app.py` の `AskRequest`
+
+| フィールド | 型 | 必須 | デフォルト | 説明 |
 |---|---|---|---|---|
-| `context` | `str` | 必須 | なし | `min_length=1`。医療記録テキスト本体 |
-| `patient_id` | `str` | 任意 | `"unknown"` | 患者識別子 |
-| `template_id` | `str \| None` | 任意 | `None` | `None` の場合は環境変数 `HOSPITAL`（既定 `hanwa`）が使用される |
+| `context` | `str` | 必須 | なし | 医療記録テキスト（日付チャンク Markdown） |
+| `patient_id` | `str` | 任意 | `"unknown"` | 患者ID |
+| `template_id` | `str \| None` | 任意 | `None` | `None` のとき環境変数 `HOSPITAL`（既定 `hanwa`） |
 
-### 1.2 `context` のテキスト形式
+### 1.2 POST /ingest（DB入力）
 
-`graph/nodes/input_adapter.py` の `_build_search_index()` は、
-正規表現 `^- (\d{8})\s*$`（行頭の `- YYYYMMDD`）をチャンク境界として分割する。
-この日付行が1つ以上存在する場合、日付単位でチャンクが生成され、
-各チャンクに `{"date": "YYYYMMDD", "index": i}` のメタデータが付与される。
+- 定義: `app.py` の `IngestRequest`
 
-日付行が存在しない場合は `_split_by_tokens()` にフォールバックし、
-`tiktoken` の `cl100k_base` でトークン分割する
-（`chunk_size = min(CHUNK_SIZE, 4096)`、`overlap = min(CHUNK_OVERLAP, 200)`、
-各チャンクのメタデータは `{"date": "unknown", "index": i}`）。
+| フィールド | 型 | 必須 | デフォルト | 説明 |
+|---|---|---|---|---|
+| `patient_id` | `str` | 必須 | なし | 患者ID（正規表現 `[A-Za-z0-9_-]+` で検証） |
+| `encounter_id` | `str` | 必須 | なし | 入院ID（同上） |
+| `query_spec_id` | `str` | 任意 | `"sql_sample"` | `query_specs/<id>.yaml` |
+| `template_id` | `str \| None` | 任意 | `None` | 省略時 `HOSPITAL` |
 
-### 1.3 入力例
+`/ingest` は `build_context_from_db(patient_id, encounter_id, query_spec_id)`（`adapters/pipeline.py`）で
+DB から context を構築してから `_run_graph` に渡す（§4）。
 
-```json
-{
-  "context": "# 患者ID: DEMO001\n\n- 20240115\n  - カルテ#1\n    主訴: 発熱と呼吸困難\n    バイタルサイン: BP 142/88 mmHg、HR 96/分、BT 38.6℃、SpO2 91%\n    酸素投与開始: 鼻カニューレ 2L/分\n\n- 20240116\n  - カルテ#1\n    抗菌薬投与開始: セフトリアキソン 2g 1日1回 点滴静注\n    血液検査: WBC 14200/μL、CRP 18.5 mg/dL\n",
-  "patient_id": "DEMO001",
-  "template_id": "hanwa"
-}
-```
+### 1.3 context のテキスト形式（両経路共通の契約）
 
-上記の `context` は `- 20240115` と `- 20240116` の2つの日付行を含むため、
-2チャンクに分割され、`chunk_index` は
-`[{"date": "20240115", "index": 0}, {"date": "20240116", "index": 1}]` となる。
+`ingest` ノード（`graph/nodes/ingest.py`）の `_build_search_index()` は、正規表現 `^- (\d{8})\s*$`
+（行頭の `- YYYYMMDD`）をチャンク境界として分割する。最初の日付行より前の本文は `_extract_summary_header()`
+が `summary_header` として抽出する（`# 患者ID:` 行は除外）。`explode_to_spans()` が各日付チャンクを
+`  - {カテゴリ名}` 小見出し単位の `grep_index`（`{date, category_label, text}`）へ展開する。小見出しが
+無いチャンクは `category_label=None` の単一スパンになる。
 
 ---
 
-## 2. 処理フロー
+## 2. 処理フロー（LangGraph v2）
 
-`POST /ask`（`app.py` の `ask()`）は `NursingSummaryState`（`graph/state.py`）の初期値を構築し、
-`build_nursing_summary_graph()`（`graph/builder.py`）でコンパイルした LangGraph グラフを `invoke` する。
-
-ノードとエッジの接続は次のとおり。
+`_run_graph` が `GlobalState`（`graph/state.py`）初期値を構築し、`build_nursing_summary_graph()`
+（`graph/builder.py`）でコンパイルしたグラフを `invoke` する。
 
 ```
 START
-  → input_adapter
-  → plan ──→ search ──→ extract ──→ evaluate
-                ↑                      │
-                │  evaluate_sufficiency │ (条件分岐)
-                └──────────────────────┤
-                                       ├─ "search"        → search へ戻る
-                                       └─ "next_section"  → next_section
-  next_section ──(has_more_sections)──┬─ "plan"       → plan へ戻る
-                                       └─ "synthesize" → synthesize
-  → synthesize
-  → reflect ──(should_continue_reflection)──┬─ "revise"           → revise → reflect へ戻る
-                                            └─ "output_formatter" → output_formatter
-  → output_formatter
-  → END
+  → ingest
+  → [route_and_fanout]  ── 総トークン total_tokens で分岐
+       ≤ SINGLE_PASS_TOKEN_THRESHOLD(既定32768) → single_pass
+       > 閾値                                   → section_worker(Send × セクション数)
+  single_pass
+  → [after_single_pass]  ── 本文が空のセクションのみ section_worker へ Send、無ければ assemble
+       → section_worker(Send × 欠損数)
+       → assemble
+  section_worker  ──(reducer merge_sections で section_results 集約)──→ assemble
+  assemble → consistency → finalize → END
 ```
 
 ### 2.1 ノード別仕様
 
-| 順 | ノード | ファイル | LLM 呼出 | 入力フィールド | 出力フィールド |
-|---|---|---|---|---|---|
-| 1 | `input_adapter` | `graph/nodes/input_adapter.py` | なし | `template_id`, `raw_context` | `template`, `search_plan`, `chunks`, `chunk_index`, `current_section_idx=0`, `search_iteration=0`, `section_results={}`, `_search_results=[]` |
-| 2 | `plan` | `graph/nodes/plan.py` | あり | `search_plan`, `current_section_idx`, `chunk_index` | `search_plan`（当該セクションの `search_queries` 更新）, `search_iteration=0` |
-| 3 | `search` | `graph/nodes/search.py` | あり（ツール呼出） | `search_plan`, `current_section_idx`, `chunks`, `chunk_index` | `_search_results` |
-| 4 | `extract` | `graph/nodes/extract.py` | あり | `_search_results`, `search_plan`, `current_section_idx` | `section_results`（当該 `section_key` に追記）, `search_iteration += 1` |
-| 5 | `evaluate` | `graph/nodes/evaluate.py` | あり | `section_results`, `search_plan`, `current_section_idx` | `_section_sufficient`, （不足時）`search_plan` の `search_queries` 更新 |
-| - | `next_section` | `graph/edges/search_loop.py` | なし | `current_section_idx` | `current_section_idx += 1`, `search_iteration=0`, `_search_results=[]`, `_section_sufficient=False` |
-| 6 | `synthesize` | `graph/nodes/synthesize.py` | あり | `template`, `section_results` | `draft_summary` |
-| 7 | `reflect` | `graph/nodes/reflect.py` | あり | `template`, `draft_summary`, `iteration_count` | `reflection_feedback`, `reflection_approved`, `iteration_count += 1` |
-| 8 | `revise` | `graph/nodes/revise.py` | あり | `draft_summary`, `reflection_feedback` | `draft_summary`（更新） |
-| 9 | `output_formatter` | `graph/nodes/output_formatter.py` | なし | `draft_summary` | `final_summary` |
+| ノード | ファイル | LLM 呼出 | 主な入力 | 主な出力 |
+|---|---|---|---|---|
+| `ingest` | `graph/nodes/ingest.py` | なし | `raw_context`, `template_id` | `template`, `routing`, `summary_header`, `chunks`, `grep_index`, `total_tokens` |
+| `single_pass` | `graph/nodes/single_pass.py` | あり（1回） | `chunks`, `summary_header`, `template` | `section_results`（全セクション） |
+| `section_worker` | `graph/nodes/section_worker.py` | あり | Send ペイロード（section, routing_entry, grep_index, chunks, summary_header） | `section_results`（1セクション） |
+| `assemble` | `graph/nodes/assemble.py` | なし | `section_results`, `template` | `draft_summary` |
+| `consistency` | `graph/nodes/consistency.py` | あり（claim分解のみ） | `draft_summary`, `grep_index` | `review_flags`（未支持claim） |
+| `finalize` | `graph/nodes/finalize.py` | なし | `draft_summary`, `section_results` | `final_summary`, `review_flags` |
 
 ### 2.2 各ノードの処理内容
 
-#### 1. input_adapter
+#### ingest
+- `load_template(template_id)` / `load_routing(template_id)` をロード（routing の `categories` は `RecordCategory` の enum 値、`CATEGORY_LABELS` でラベル解決可能であることが検証済み）。
+- `_extract_summary_header()` で患者横断情報を `summary_header` に抽出（検索ヒットに依存せず常時供給）。
+- `_build_search_index()` で日付チャンク `chunks`/`chunk_index` を生成。
+- `explode_to_spans()` で `grep_index`（`{date, category_label, text}`）を構築。
+- `tiktoken`（cl100k_base）で `total_tokens` を算出。
 
-- `load_template(template_id)` でテンプレート定義（YAML）をロードする。
-- テンプレートの `sections` から `search_plan` を初期化する。各要素は
-  `{"section_key", "section_name", "description", "search_queries": []}`。
-- `_build_search_index(raw_context)` で `chunks` と `chunk_index` を生成する（1.2 参照）。
+#### route_and_fanout（条件付きエッジ・`graph/edges/routing_v2.py`）
+- `total_tokens <= SINGLE_PASS_TOKEN_THRESHOLD` → `"single_pass"`。
+- それ以外 → 全セクションを `Send("section_worker", payload)` で並列起動。
 
-#### 2. plan
+#### single_pass
+- 全セクション仕様 + `summary_header` + 全 `chunks` を1プロンプトに入れ、`chat_json`（`format` + `extract_json` + bounded retry、`think=False`、`num_ctx=LARGE_NUM_CTX`）で `{sections: [{section_key, body, cited_dates}]}` を取得。
+- 各テンプレートセクションに `SectionResult` を生成。本文が空のセクションは `review_flag=True`。
 
-- `search_plan[current_section_idx]` を対象セクションとする。
-- `chunk_index` から日付の集合を取得し `available_dates` を構成する。
-- `PLAN_PROMPT`（`llm/prompts.py`）に `section_name`, `section_description`, `available_dates` を埋め込み、
-  `chat(prompt, format_schema={"queries": [str]}, temperature=0.0)` を呼ぶ。
-- 応答 JSON を `json.loads` して `queries` を取得する。
-  パースに失敗した場合は `_extract_keywords_from_text()` にフォールバックし、
-  箇条書き行（長さ50未満）を最大5件まで抽出する。
-- 当該セクションの `search_queries` に格納する。
+#### after_single_pass（条件付きエッジ）
+- 本文が空のセクションがあれば、それらだけ `Send("section_worker", ...)`。無ければ `"assemble"`。
 
-#### 3. search
+#### section_worker（単一ノード・Send で起動）
+- `collect(entry, grep_index, chunks)`（`graph/search_index.py`）: synthetic は全日付チャンク供給、extractive はカテゴリ悉皆（top-k 制限なし）＋ keyword grep（label=None スパンも対象）。
+- `_extract()`: `SECTION_EXTRACT_PROMPT` + `chat_json`（`{reasoning, body, cited_dates}`）。本文が空なら最大 `MAX_REFILL+1` 回まで再試行（決定論カウンタ。LLM スコア不使用）。
+- `absent_categories(entry, present_labels)`: routing が要求するが記録に存在しないカテゴリラベルを欠落として返す。欠落があれば `review_flag`。
+- `{section_key: SectionResult}` を返し、reducer `merge_sections` が `section_results` に集約。
 
-- 提供ツール: `search_by_keyword(keyword)`、`search_by_date_range(start_date, end_date)`。
-- `chat_with_tools(SEARCH_PROMPT, tools=[...])` を呼び、応答の `tool_calls` を実行する。
-  - `search_by_keyword`: `_execute_keyword_search()` が `keyword.lower()` を含むチャンクを返す。
-  - `search_by_date_range`: `_execute_date_range_search()` が `start_date <= meta["date"] <= end_date` のチャンクを返す。
-- `tool_calls` が存在しない、または例外が発生した場合は、
-  当該セクションの `search_queries` を用いて `_execute_keyword_search()` でフォールバック検索する。
-- 結果は `hash` ベースで重複除去し、先頭5件を `_search_results` とする。
+#### assemble
+- `section_delimiter`（既定 `--- {name} ---`）でテンプレート順に決定論組立。空・未生成セクションは `"記録なし（要確認）"`。LLM 不使用。
 
-#### 4. extract
+#### consistency
+- `CONSISTENCY_PROMPT` + `chat_json` で `{claims: [...]}` を分解。
+- 各 claim の主要トークン（数値・語）が `grep_index`＋`summary_header` に過半含まれるかを決定論照合。未支持 claim を `review_flags` に追加（自動修復しない）。
 
-- `_search_results` が空の場合、`section_results[section_key] = "記録なし"` とし、`search_iteration += 1`。
-- 空でない場合、`EXTRACT_PROMPT` に `section_name`, `section_description`,
-  および `_search_results` を `\n\n---\n\n` で結合した文字列を埋め込み、`chat(prompt)` を呼ぶ。
-- 応答を `section_results[section_key]` に格納する。`section_results` は
-  `merge_dicts` reducer（`graph/state.py`）により、同一キーへは改行区切りで追記される。
-- `search_iteration += 1`。
+#### finalize
+- `final_summary = draft_summary`。`review_flag` が立った `section_key` を `review_flags` に集約。
 
-#### 5. evaluate
+### 2.3 LLM 呼び出し（`llm/client.py`）
+- `chat(prompt, format_schema, temperature, think=False, options_override)`: `think=False` で reasoning 混入を防ぎ、`options_override` で `num_ctx` をノード単位上書き。
+- `chat_json(prompt, schema, max_retries=3)`: `chat` + `extract_json`（コードフェンス除去・平衡括弧抽出）+ retry。Ollama Cloud で `format` 非強制でも復旧。
+- モデル/接続先は `ENV` で切替（production=ローカル `gpt-oss:120b`、test=`gpt-oss:120b-cloud`）。
 
-- `EVALUATE_PROMPT` に `section_name`, `section_description`,
-  当該セクションの抽出済みテキストを埋め込み、`chat(prompt, temperature=0.0)` を呼ぶ。
-- 応答に `"SUFFICIENT"`（大文字化して判定）が含まれれば `_section_sufficient=True`。
-- 含まれない場合、`_extract_additional_queries()` で応答から追加検索クエリを抽出し、
-  当該セクションの `search_queries` を更新、`_section_sufficient=False`。
-- 条件分岐 `evaluate_sufficiency()`（`graph/edges/search_loop.py`）:
-  - `_section_sufficient == True` または `search_iteration >= max_search_iterations` → `next_section`
-  - それ以外 → `search`（再検索）
+### 2.4 ループ上限（決定論カウンタ）
 
-#### next_section（エッジ関数）
+| ループ | 制御 | 上限 |
+|---|---|---|
+| section_worker 内部の再抽出 | `MAX_REFILL`（既定1） | 本文が空のときのみ再試行 |
+| single_pass の欠損補完 | after_single_pass | 欠損セクションを1回だけ section_worker へ |
 
-- `current_section_idx += 1`、`search_iteration=0`、`_search_results=[]`、`_section_sufficient=False`。
-- 条件分岐 `has_more_sections()`:
-  - `current_section_idx < len(search_plan)` → `plan`（次セクションへ）
-  - それ以外 → `synthesize`
-
-#### 6. synthesize
-
-- `build_format_instruction(template)`（`templates_loader/loader.py`）で
-  テンプレートのセクション定義からフォーマット指示文を生成する。
-- `template["sections"]` の各セクションについて、
-  `section_results` の該当値（未取得時は `"記録なし"`）を `### {name}\n{content}` 形式で連結する。
-- `SYNTHESIZE_PROMPT` に上記2つを埋め込み、`chat(prompt)` を呼ぶ。応答を `draft_summary` に格納する。
-
-#### 7. reflect
-
-- `template["sections"]` のセクション名一覧を構成する。
-- `REFLECTION_PROMPT` に セクション名一覧と `draft_summary` を埋め込み、
-  `chat(prompt, temperature=0.0)` を呼ぶ。
-- 応答に `"APPROVED"`（大文字化して判定）が含まれれば `reflection_approved=True`。
-  `chat` が例外を送出した場合も `reflection_approved=True` とする。
-- `iteration_count += 1`。
-- 条件分岐 `should_continue_reflection()`（`graph/edges/reflection.py`）:
-  - `reflection_approved == True` → `output_formatter`
-  - `iteration_count >= max_iterations` → `output_formatter`
-  - それ以外 → `revise`
-
-#### 8. revise
-
-- `REVISION_PROMPT` に `draft_summary` と `reflection_feedback` を埋め込み、`chat(prompt)` を呼ぶ。
-- 応答で `draft_summary` を更新し、`reflect` へ戻る。
-
-#### 9. output_formatter
-
-- `final_summary = draft_summary` とする。
-
-### 2.3 LLM 呼び出し条件
-
-`llm/client.py` の `chat()` / `chat_with_tools()` は `ollama_client.chat()` を呼ぶ。
-
-- モデル: `config.settings.MODEL_NAME`（`ENV=production` で `gpt-oss:120b`、`ENV=test` で `gpt-oss:120b-cloud`）
-- 接続先: `config.settings.OLLAMA_BASE_URL`（`ENV=production` で `http://localhost:11434`、`ENV=test` で `https://ollama.com`）
-- オプション: `LLM_OPTIONS = {temperature: 0.1, top_p: 0.92, repeat_penalty: 1.2, num_ctx: 8192, num_predict: 4096}`
-  （`plan` / `evaluate` / `reflect` は `temperature=0.0` で上書き）
-- `keep_alive`: `"60m"`
-
-### 2.4 ループの上限
-
-| ループ | 制御変数 | 上限 | 既定値 |
-|---|---|---|---|
-| セクション内再検索（`search`→`extract`→`evaluate`→`search`） | `search_iteration` | `max_search_iterations` | `MAX_SEARCH_ITERATIONS = 3` |
-| Reflection（`reflect`→`revise`→`reflect`） | `iteration_count` | `max_iterations` | `MAX_REFLECTION_ITERATIONS = 2` |
-
-セクションのループは全 `search_plan` 要素を `current_section_idx` で順に処理する。
+LLM スコア（0–1）や「SUFFICIENT」LLM 判定は停止条件に**使わない**。
 
 ---
 
 ## 3. 出力
 
-### 3.1 HTTP レスポンス
-
-- 定義: `app.py` の `AskResponse`（Pydantic モデル）
-- ステータス: 正常時 `200`、`template_id` 不正時 `400`、グラフ内エラー時 `500`
+- 定義: `app.py` の `AskResponse`（`/ask`・`/ingest` 共通）
 
 | フィールド | 型 | 説明 |
 |---|---|---|
-| `answer` | `str` | `final_summary`。テンプレート形式の看護サマリー |
-| `template_id` | `str` | 使用されたテンプレート ID |
-| `iteration_count` | `int` | Reflection の反復回数 |
+| `answer` | `str` | `final_summary`。テンプレート区切りの看護サマリー |
+| `template_id` | `str` | 使用テンプレートID |
+| `review_flags` | `list[str]` | 人手レビュー対象（欠落セクションキー・未支持 claim） |
 
-### 3.2 `answer` の構造
-
-`answer` はテンプレート（`templates/{template_id}.yaml`）の `sections` で定義された区切りを持つ。
-`hanwa` テンプレートの `section_delimiter` は `"--- {name} ---"` であり、
-6セクション（`指導した内容` / `医療機器装着・挿入・処置部位` / `入院中の看護の経過（生活状況）` /
-`患者への病状説明及び本人・家族の受け止め方` / `継続される問題（今後のリスク）` / `その他`）で構成される。
-`shinkinen` テンプレートは2セクション（`入院中の経過及び看護上の問題経過` / `備考`）。
-
-### 3.3 出力例（構造）
-
-```json
-{
-  "answer": "--- 指導した内容 ---\n[退院後の服薬指導・感染予防指導の内容]\n\n--- 医療機器装着・挿入・処置部位 ---\n[酸素投与・点滴に関する情報]\n\n--- 入院中の看護の経過（生活状況） ---\n2024年1月15日 [入院時の状態]\n2024年1月16日 [治療経過]\n...\n\n--- 患者への病状説明及び本人・家族の受け止め方 ---\n[病状説明と反応]\n\n--- 継続される問題（今後のリスク） ---\n[継続課題]\n\n--- その他 ---\n[その他事項]",
-  "template_id": "hanwa",
-  "iteration_count": 1
-}
-```
+`answer` はテンプレート（`templates/<id>.yaml`）の `section_delimiter` で区切られる。
+`hanwa` は6セクション、`shinkinen` は2セクション。
 
 ---
 
-## 4. State フィールド一覧
+## 4. DB入力パイプライン（/ingest 経路）
 
-`graph/state.py` の `NursingSummaryState`（TypedDict）。
+`build_context_from_db(patient_id, encounter_id, spec_id)`（`adapters/pipeline.py`）:
+
+```
+load_query_spec(spec_id)             # query_specs_loader: Pydantic検証 + バインド変数検証
+  → get_adapter(source_type).fetch() # adapters/base 登録の RecordSourceAdapter（sql 等）
+  → normalize(raw, spec, ...)        # adapters/normalizer: role別マッピング + コード解決 + cross_cutting
+  → sample(record_set, spec)         # adapters/sampler: extremes(first/last/min/max)
+  → mask(record_set)                 # adapters/phi_masker: 自由記述の電話/郵便/メール等を非可逆マスク
+  → render(record_set)               # adapters/markdown_renderer: # 患者ID + サマリヘッダ + - YYYYMMDD
+  → context（= AskRequest.context と同形式）
+```
+
+- `query_spec` は「論理層（record_category / columns(role) / contributes_to / sampling）」と「retrieval層（source_type 固有: `sql`）」に分離。
+- `retrieval.sql` のバインド変数は `:patient_id` / `:encounter_id` のみ許可（ローダーで検証、SQLインジェクション防止）。
+- `role=item` かつ `codesystem` 指定の列はコード→名称解決（例: `31001368` → `体温`）。未解決は `[未解決コード:...]`。
+- 患者横断カテゴリ（`allergy`, `infection`, `nursing_problem`, `patient_profile`, `nursing_acuity`）は `cross_cutting=True` でサマリヘッダ領域へ。
+
+---
+
+## 5. GlobalState フィールド一覧（`graph/state.py`）
 
 | フィールド | 型 | 用途 |
 |---|---|---|
-| `patient_id` | `str` | 患者識別子 |
-| `raw_context` | `str` | 入力医療記録テキスト |
-| `hospital` | `str` | 環境変数 `HOSPITAL` の値 |
-| `chunks` | `list[str]` | 分割済みチャンク本文 |
-| `chunk_index` | `list[dict]` | 各チャンクのメタデータ（`date`, `index`） |
-| `template_id` | `str` | テンプレート ID |
-| `template` | `dict` | ロード済みテンプレート定義 |
-| `search_plan` | `list[dict]` | セクション別の検索計画 |
-| `section_results` | `dict[str, str]` | セクション別の抽出結果（`merge_dicts` reducer） |
-| `current_section_idx` | `int` | 処理中セクションのインデックス |
-| `search_iteration` | `int` | 当該セクションの検索反復回数 |
-| `max_search_iterations` | `int` | 検索反復の上限 |
-| `_search_results` | `list[str]` | `search` の結果（ノード間受け渡し） |
-| `draft_summary` | `str` | 統合および改訂後のドラフト |
-| `reflection_feedback` | `str` | `reflect` の応答テキスト |
-| `reflection_approved` | `bool` | `reflect` が `APPROVED` を返したか |
-| `iteration_count` | `int` | Reflection の反復回数 |
-| `max_iterations` | `int` | Reflection 反復の上限 |
-| `final_summary` | `str` | 最終出力 |
-| `error` | `Optional[str]` | エラーメッセージ |
+| `patient_id` / `raw_context` / `hospital` / `template_id` | `str` | 入力 |
+| `template` / `routing` | `dict` | ingest がロード |
+| `summary_header` | `str` | 患者横断情報（常時供給） |
+| `chunks` | `list[str]` | 日付チャンク本文 |
+| `grep_index` | `list[dict]` | `{date, category_label, text}` スパン |
+| `total_tokens` | `int` | 入力規模（経路選択） |
+| `section_results` | `Annotated[dict[str, SectionResult], merge_sections]` | セクション別結果（並列集約） |
+| `draft_summary` / `final_summary` | `str` | 組立・最終出力 |
+| `review_flags` | `Annotated[list[str], add]` | レビュー対象（並列加算） |
+| `error` | `Optional[str]` | エラー |
+
+`SectionResult`: `{section_key, body, cited_dates, missing, review_flag}`。

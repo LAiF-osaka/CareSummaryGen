@@ -9,6 +9,30 @@
 
 ---
 
+## 実装状況（2026-04 時点）
+
+**Phase 1〜2 を実装済み**。DB→context→看護サマリ生成の一気通貫が動作する（in-memory SQLite で検証）。
+実装ファイルと本設計の対応:
+
+| 設計 | 実装ファイル | 状態 |
+|---|---|---|
+| 中間表現 `ClinicalRecord` 等 | `adapters/models.py` | 実装済み |
+| 取得アダプタ抽象 + registry | `adapters/base.py` | 実装済み |
+| SQL 取得 | `adapters/sql_source.py`（SQLAlchemy、engine 注入可） | 実装済み |
+| 正規化（role別マッピング・コード解決） | `adapters/normalizer.py` | 実装済み |
+| サンプリング（extremes） | `adapters/sampler.py` | 実装済み |
+| PHI マスク（regex・非可逆） | `adapters/phi_masker.py` | 実装済み（NER は将来オプション） |
+| Markdown 化 | `adapters/markdown_renderer.py` | 実装済み |
+| 統合 `build_context_from_db` | `adapters/pipeline.py` | 実装済み |
+| query_spec ローダー（Pydantic + bind 検証） | `query_specs_loader/{models,loader}.py` | 実装済み |
+| query_spec / codesystem YAML | `query_specs/sql_sample.yaml`, `query_specs/codesystems/medis_obs.yaml` | サンプル実装済み |
+| `/ingest` エンドポイント | `app.py` | 実装済み（認証は未実装＝ユーザー方針） |
+| FHIR / SS-MIX2 取得 | — | 未実装（Phase 3、retrieval 層差し替えで対応） |
+
+未確定事項（§9 の17項目、特に実DBのカラム名・コード体系・看護記録の格納先）はカラム確定時に query_spec / codesystem の更新で対応する。実行時フローは [data-flow.md](data-flow.md) §4 を正とする。
+
+---
+
 ## 0. 既存コードの確定事実（接続先）
 
 実装着手前に確認した事実。設計はこれに接続する。
