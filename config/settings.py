@@ -15,18 +15,44 @@ import dotenv
 dotenv.load_dotenv()
 
 # --- 環境識別 ---
-ENV: str = os.environ.get("ENV", "production")
+# .env で ENV を切り替えるだけで Ollama 設定が一括で入れ替わる。
+ENV: str = os.environ.get("ENV", "production").lower()
+
+# 環境ごとのデフォルト値（環境別変数が未設定のときに使用）。
+#   production: ローカル Ollama（閉域ネットワーク）
+#   test: Ollama Cloud（インターネット経由、要 `ollama signin`）
+_ENV_DEFAULTS: dict[str, tuple[str, str]] = {
+    "production": ("gpt-oss:120b", "http://localhost:11434"),
+    "test": ("gpt-oss:120b-cloud", "https://ollama.com"),
+}
+_default_model, _default_base_url = _ENV_DEFAULTS.get(
+    ENV, _ENV_DEFAULTS["production"]
+)
+
+
+def _resolve(name: str, default: str) -> str:
+    """環境別変数を解決する。
+
+    優先順位: 環境別変数 ``NAME_<ENV>`` → 共通変数 ``NAME`` → ``default``。
+    これにより .env に両環境の設定を併記しておき、ENV の切替だけで
+    対応する設定へ一括で切り替えられる。
+
+    Args:
+        name: 環境変数のベース名（例: "OLLAMA_MODEL"）。
+        default: いずれも未設定の場合に使用するデフォルト値。
+
+    Returns:
+        解決された設定値。
+    """
+    env_specific = os.environ.get(f"{name}_{ENV.upper()}")
+    if env_specific:
+        return env_specific
+    return os.environ.get(name, default)
+
 
 # --- Ollama 設定（環境依存） ---
-if ENV == "test":
-    # テスト環境: Ollama Cloud 経由でクラウド版モデルを使用
-    # 事前に `ollama signin` でブラウザ認証が必要
-    MODEL_NAME: str = os.environ.get("OLLAMA_MODEL", "gpt-oss:120b-cloud")
-    OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "https://ollama.com")
-else:
-    # 本番環境: ローカル Ollama（閉域ネットワーク）
-    MODEL_NAME: str = os.environ.get("OLLAMA_MODEL", "gpt-oss:120b")
-    OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+MODEL_NAME: str = _resolve("OLLAMA_MODEL", _default_model)
+OLLAMA_BASE_URL: str = _resolve("OLLAMA_BASE_URL", _default_base_url)
 
 # --- チャンク分割設定 ---
 CHUNK_SIZE: int = int(os.environ.get("CHUNK_SIZE", "130000"))
