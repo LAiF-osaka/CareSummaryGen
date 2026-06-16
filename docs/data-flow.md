@@ -130,7 +130,61 @@ START
 - `consistency`: `chat_json` で claim 分解→主要トークンの過半が `grep_index`＋`summary_header` に含まれるか決定論照合。未支持を `review_flags`（自動修復しない）。
 - `finalize`: `final_summary = draft_summary`、`review_flag` 立ちセクションを集約。
 
-### 3.3 LLM 呼び出し（`llm/client.py`）
+### 3.3 検索ロジック（`graph/search_index.py`）
+
+セクションごとに「どの記録を LLM に渡すか」を決める処理。**ベクトル DB を使わず、grep（部分文字列マッチ）と決定論的なカテゴリ照合のみ**で行う。LLM も使わない。
+
+#### (a) grep 索引の構築 — `explode_to_spans(chunks, chunk_index)`（`ingest` で実行）
+
+各日付チャンクを `  - {カテゴリ名}` 小見出し単位のスパンに分解し、`grep_index = [{date, category_label, text}]` を構築する。小見出しが無いチャンク（テキスト/XML 由来）は `category_label=None` の単一スパンになる。
+
+```
+- 20230209
+  - バイタルサイン       ┐ span{date:20230209, category_label:"バイタルサイン",
+    体温: 37.8℃          │       text:"  - バイタルサイン\n    体温: 37.8℃\n    SpO2: 94%"}
+    SpO2: 94%            ┘
+  - 看護記録            ┐ span{date:20230209, category_label:"看護記録", text:...}
+    S(主観): 息苦しい    ┘
+```
+
+#### (b) routing 定義 — `templates/<id>.routing.yaml`
+
+セクションごとに「どのカテゴリ・キーワードを集めるか」「収集モード」を定義する。`categories` は `RecordCategory` の enum 値で書き、`resolve_category_labels()` が `CATEGORY_LABELS` で日本語ラベルへ解決してから grep する（grep のアンカーはラベル）。
+
+```yaml
+medical_equipment:                    # セクション
+  mode: extractive
+  categories: [procedure, medication, vital_sign]   # → 処置・医療機器 / 薬剤・服薬 / バイタルサイン
+  keywords: ["カテーテル", "ドレーン", "挿入", "装着", "酸素", "点滴"]
+```
+
+#### (c) 収集 — `collect(entry, grep_index, chunks)`
+
+| mode | 収集方法 |
+|---|---|
+| `extractive` | **① カテゴリ悉皆**: routing の `categories` をラベル解決し、`grep_index` の該当ラベルスパンを**全件**回収（**top-k で切らない**＝取りこぼし防止）。**② keyword grep**: `keywords` の正規表現に一致するスパンを補完（カテゴリ越境・`category_label=None` スパンも対象）。 |
+| `synthetic` | 全日付チャンクを供給（`nursing_process` / `risks` 等。検索で絞らず時系列全体を渡す）。 |
+
+戻り値は `(収集テキスト, 実在カテゴリラベルの集合 present_labels, 関与日付)`。
+
+```
+collect("medical_equipment") の例:
+  ① 悉皆: category_label ∈ {処置・医療機器, 薬剤・服薬, バイタルサイン} のスパンを全件
+  ② keyword: 本文に「酸素」「点滴」等を含むスパンを追加（重複除外）
+  → これらを evidence として section_worker の _extract に渡す
+```
+
+#### (d) 欠落検出 — `absent_categories(entry, present_labels)`
+
+routing が要求するが記録に存在しないカテゴリ（`target_labels − present_labels`）を返す。記録自体に無いカテゴリは grep しても得られないため、`section_worker` は欠落として `missing` に記録し `review_flag` を立てる（assemble で「記録なし（要確認）」、finalize で `review_flags`）。
+
+#### 設計上の要点
+
+- **検索ヒット依存からの脱却**: カテゴリ悉皆が主経路（該当カテゴリの行は全て渡す）。keyword grep はカテゴリ越境・未分類の補完。`max_results` のような件数上限を設けない。
+- **患者横断情報の常時供給**: `summary_header`（アレルギー・感染症・看護問題等、§1.3）は検索に依存せず `single_pass` / `_extract` に常に渡る。
+- **決定論**: 収集・欠落判定は LLM・スコアを使わない純関数（`graph/search_index.py`）。
+
+### 3.4 LLM 呼び出し（`llm/client.py`）
 
 - `chat(prompt, format_schema, temperature, think=False, options_override)`: `think=False` で reasoning 混入防止、`options_override` で `num_ctx` 上書き。
 - `chat_json(prompt, schema, max_retries=3)`: `chat` + `extract_json`（コードフェンス除去・平衡括弧抽出）+ retry。
