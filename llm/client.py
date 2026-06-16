@@ -8,10 +8,11 @@ LangChain は使用せず、ollama パッケージのみに依存する。
     test: Ollama Cloud（https://ollama.com、API キー認証）
 """
 
-import os
+import json
+import re
 
 import httpx
-from ollama import Client
+from ollama import ChatResponse, Client
 
 from config.settings import ENV, LLM_OPTIONS, MODEL_NAME, OLLAMA_BASE_URL
 
@@ -97,7 +98,7 @@ def chat_with_tools(
     tools: list,
     *,
     system: str = "",
-) -> "ChatResponse":
+) -> ChatResponse:
     """ツール呼び出し付きでチャットリクエストを送信する。
 
     Args:
@@ -121,3 +122,80 @@ def chat_with_tools(
         keep_alive="60m",
     )
     return response
+
+
+def extract_json(text: str) -> dict | None:
+    """LLM 応答テキストから JSON オブジェクトを堅牢に抽出する。
+
+    gpt-oss は format 指定時でも reasoning trace やコードフェンス、
+    説明文を伴って JSON を返すことがあるため、複数の戦略を順に試す:
+    (1) ```json ... ``` コードフェンス内、(2) 最初の平衡した {...}、
+    (3) テキスト全体。最初に json.loads できた dict を返す。
+
+    Args:
+        text: LLM の応答テキスト。
+
+    Returns:
+        パースできた dict。いずれも失敗した場合は None。
+    """
+    if not text:
+        return None
+
+    candidates: list[str] = []
+
+    # 1. コードフェンス内の JSON
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fence:
+        candidates.append(fence.group(1))
+
+    # 2. 最初の平衡した {...}
+    balanced = _first_balanced_object(text)
+    if balanced:
+        candidates.append(balanced)
+
+    # 3. テキスト全体
+    candidates.append(text.strip())
+
+    for candidate in candidates:
+        try:
+            obj = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(obj, dict):
+            return obj
+
+    return None
+
+
+def _first_balanced_object(text: str) -> str | None:
+    """テキスト中で最初に出現する平衡した {...} 部分文字列を返す。
+
+    文字列リテラル内の波括弧・エスケープを考慮し、深さ0で閉じた位置までを
+    切り出す。見つからない場合は None。
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        char = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        else:
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+    return None
