@@ -32,3 +32,6 @@ medgemma/
 
 # DB
 vectorDB
+
+# document
+*.html

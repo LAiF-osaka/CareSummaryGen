@@ -2,6 +2,7 @@
 
 import pytest
 
+
 # Ollama 接続チェック用マーカー
 def pytest_configure(config):
     config.addinivalue_line(

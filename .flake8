@@ -1,0 +1,6 @@
+[flake8]
+max-line-length = 79
+# E203 (whitespace before ':') と W503 (line break before binary operator) は
+# Black の整形と競合するため無視する（Black 公式推奨）。
+extend-ignore = E203, W503
+exclude = .venv, old, __pycache__, .git
