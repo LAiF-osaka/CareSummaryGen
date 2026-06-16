@@ -43,13 +43,18 @@ def list_templates() -> list[dict]:
     """
     templates = []
     for path in sorted(TEMPLATE_DIR.glob("*.yaml")):
+        # routing 定義（<id>.routing.yaml）はテンプレート本体ではない
+        if path.name.endswith(".routing.yaml"):
+            continue
         with open(path, encoding="utf-8") as f:
             t = yaml.safe_load(f)
-            templates.append({
-                "id": t["id"],
-                "name": t["name"],
-                "description": t.get("description", ""),
-            })
+            templates.append(
+                {
+                    "id": t["id"],
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                }
+            )
     return templates
 
 

@@ -16,6 +16,8 @@ dependencies = [
     "tiktoken>=0.8.0",
     "pydantic>=2.7.4",
     "pyyaml>=6.0",
+    # --- DB取得（query_spec 経由の汎用RDBアクセス） ---
+    "sqlalchemy>=2.0.0",
     # --- 環境変数 ---
     "python-dotenv>=1.0.0",
     # --- 前処理（既存） ---

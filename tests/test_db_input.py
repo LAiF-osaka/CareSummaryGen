@@ -14,10 +14,7 @@ from adapters.models import (
     RecordField,
 )
 from adapters.pipeline import build_context
-from graph.nodes.input_adapter import (
-    _build_search_index,
-    _extract_summary_header,
-)
+from graph.nodes.ingest import _build_search_index, _extract_summary_header
 
 
 def _sample_record_set() -> NormalizedRecordSet:

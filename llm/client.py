@@ -59,6 +59,8 @@ def chat(
     system: str = "",
     format_schema: dict | None = None,
     temperature: float | None = None,
+    think: bool = False,
+    options_override: dict | None = None,
 ) -> str:
     """Ollama にチャットリクエストを送信してテキスト応答を返す。
 
@@ -67,6 +69,9 @@ def chat(
         system: システムプロンプト（オプション）。
         format_schema: 構造化出力用の JSON Schema（オプション）。
         temperature: 温度パラメータの上書き（オプション）。
+        think: 思考モード。gpt-oss では format と排他のため、構造化出力時は
+            False を指定して reasoning trace の混入を防ぐ（既定 False）。
+        options_override: num_ctx 等をノード単位で上書きする辞書（オプション）。
 
     Returns:
         LLM の応答テキスト。
@@ -79,12 +84,15 @@ def chat(
     options = {**LLM_OPTIONS}
     if temperature is not None:
         options["temperature"] = temperature
+    if options_override:
+        options.update(options_override)
 
     kwargs: dict = {
         "model": MODEL_NAME,
         "messages": messages,
         "options": options,
         "keep_alive": "60m",
+        "think": think,
     }
     if format_schema is not None:
         kwargs["format"] = format_schema
@@ -164,6 +172,49 @@ def extract_json(text: str) -> dict | None:
         if isinstance(obj, dict):
             return obj
 
+    return None
+
+
+def chat_json(
+    prompt: str,
+    schema: dict,
+    *,
+    max_retries: int = 3,
+    options_override: dict | None = None,
+) -> dict | None:
+    """構造化出力を堅牢に取得する（format + extract_json + bounded retry）。
+
+    gpt-oss は format 指定でも JSON 以外を混ぜることがあるため、
+    extract_json で抽出し、失敗時はエラー文を最新500字だけ付加して再試行する。
+    Ollama Cloud では format が強制されないため retry が特に重要。
+
+    Args:
+        prompt: ユーザープロンプト。
+        schema: 期待する JSON スキーマ（format に渡す）。
+        max_retries: 最大試行回数。
+        options_override: num_ctx 等の上書き。
+
+    Returns:
+        パースできた dict。全試行失敗時は None。
+    """
+    current = prompt
+    for _ in range(max_retries):
+        raw = chat(
+            current,
+            format_schema=schema,
+            temperature=0.0,
+            think=False,
+            options_override=options_override,
+        )
+        parsed = extract_json(raw)
+        if parsed is not None:
+            return parsed
+        # 再試行: JSON 抽出に失敗した旨を末尾に付加（最新のみ・500字上限）
+        snippet = (raw or "")[-500:]
+        current = (
+            f"{prompt}\n\n# 前回の出力は JSON として解釈できなかった。"
+            f"JSON のみを出力すること。前回出力(末尾):\n{snippet}"
+        )
     return None
 
 

@@ -1,0 +1,55 @@
+# サンプル query_spec（SQL）。
+# 論理層（record_category / columns(role) / contributes_to / sampling）と
+# retrieval層（sql）を分離。バインド変数は :patient_id / :encounter_id のみ許可。
+# カラム名は確定前の例であり、実DBに合わせて変更する（docs/db-input-design.md §9）。
+
+spec_id: sql_sample
+source_type: sql
+
+keys:
+  patient_id: { required: true }
+  encounter_id: { required: true }
+
+records:
+  - record_category: vital_sign
+    contributes_to: [nursing_process, medical_equipment]
+    columns:
+      measured_at: { role: datetime, datetime_kind: measured }
+      item_code: { role: item, codesystem: medis_obs }
+      value: { role: value }
+      unit: { role: unit }
+      recorder_name: { role: recorder }
+    sampling: { strategy: extremes }
+    retrieval:
+      sql: |
+        SELECT measured_at, item_code, value, unit, recorder_name
+        FROM vital_signs
+        WHERE patient_id = :patient_id AND encounter_id = :encounter_id
+        ORDER BY measured_at ASC
+
+  - record_category: nursing_note
+    contributes_to: [nursing_process, patient_condition, instruction]
+    columns:
+      recorded_at: { role: datetime, datetime_kind: recorded }
+      soap_s: { role: text, label: "S(主観)" }
+      soap_o: { role: text, label: "O(客観)" }
+      soap_a: { role: text, label: "A(評価)" }
+      soap_p: { role: text, label: "P(計画)" }
+      recorder_name: { role: recorder }
+    retrieval:
+      sql: |
+        SELECT recorded_at, soap_s, soap_o, soap_a, soap_p, recorder_name
+        FROM nursing_records
+        WHERE patient_id = :patient_id AND encounter_id = :encounter_id
+        ORDER BY recorded_at ASC
+
+  - record_category: infection
+    contributes_to: [risks]
+    columns:
+      name: { role: item, label: 感染症 }
+      detail: { role: text, label: 内容 }
+    retrieval:
+      sql: |
+        SELECT name, detail
+        FROM infections
+        WHERE patient_id = :patient_id AND encounter_id = :encounter_id

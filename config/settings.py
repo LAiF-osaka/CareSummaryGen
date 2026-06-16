@@ -61,13 +61,16 @@ CHUNK_OVERLAP: int = int(os.environ.get("CHUNK_OVERLAP", "1000"))
 # --- 病院設定 ---
 HOSPITAL: str = os.environ.get("HOSPITAL", "hanwa")
 
-# --- Agentic Search 設定 ---
-MAX_SEARCH_ITERATIONS: int = int(os.environ.get("MAX_SEARCH_ITERATIONS", "3"))
-
-# --- Reflection 設定 ---
-MAX_REFLECTION_ITERATIONS: int = int(
-    os.environ.get("MAX_REFLECTION_ITERATIONS", "2")
+# --- Agentic Search v2 設定 ---
+# 総トークンがこの閾値以下なら single-pass（全セクション1回生成）、
+# 超える場合は section-routed map（セクション単位）に分岐する。
+SINGLE_PASS_TOKEN_THRESHOLD: int = int(
+    os.environ.get("SINGLE_PASS_TOKEN_THRESHOLD", "32768")
 )
+# single-pass / synthetic セクションで使用する拡張コンテキスト長。
+LARGE_NUM_CTX: int = int(os.environ.get("LARGE_NUM_CTX", "32768"))
+# section_worker 内部の refill 上限（決定論カウンタ）。
+MAX_REFILL: int = int(os.environ.get("MAX_REFILL", "1"))
 
 # --- LLM 共通オプション ---
 LLM_OPTIONS: dict = {

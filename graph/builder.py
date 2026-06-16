@@ -1,93 +1,66 @@
-"""LangGraph グラフ構築モジュール。
+"""LangGraph グラフ構築（v2 agentic search）。
 
-Agentic Search + Reflection のグラフを構築・コンパイルする。
+入力規模で single-pass / section-routed map を切り替え、
+セクションを Send で並列処理し、決定論的に組み立てる。
+
+詳細設計: docs/agentic-search-redesign.md を参照。
+
+フロー:
+    ingest → [route_and_fanout]
+        ≤閾値 → single_pass → [after_single_pass]
+                → (欠損のみ)section_worker → assemble
+        >閾値 → section_worker(Send×N) → assemble
+    assemble → consistency → finalize → END
 """
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import RetryPolicy
 
-from graph.edges.reflection import should_continue_reflection
-from graph.edges.search_loop import (
-    evaluate_sufficiency,
-    has_more_sections,
-    next_section,
-)
-from graph.nodes.evaluate import evaluate
-from graph.nodes.extract import extract
-from graph.nodes.input_adapter import input_adapter
-from graph.nodes.output_formatter import output_formatter
-from graph.nodes.plan import plan
-from graph.nodes.reflect import reflect
-from graph.nodes.revise import revise
-from graph.nodes.search import search
-from graph.nodes.synthesize import synthesize
-from graph.state import NursingSummaryState
+from graph.edges.routing_v2 import after_single_pass, route_and_fanout
+from graph.nodes.assemble import assemble
+from graph.nodes.consistency import consistency
+from graph.nodes.finalize import finalize
+from graph.nodes.ingest import ingest
+from graph.nodes.section_worker import section_worker
+from graph.nodes.single_pass import single_pass
+from graph.state import GlobalState
 
 
 def build_nursing_summary_graph() -> CompiledStateGraph:
-    """看護サマリー生成グラフを構築してコンパイルする。
+    """看護サマリー生成グラフ（v2）を構築してコンパイルする。"""
+    builder = StateGraph(GlobalState)
 
-    Returns:
-        コンパイル済みの LangGraph グラフ。
-    """
-    builder = StateGraph(NursingSummaryState)
+    _llm_retry = RetryPolicy(max_attempts=2)
 
-    # --- ノード登録 ---
-    builder.add_node("input_adapter", input_adapter)
-    builder.add_node(
-        "plan", plan, retry_policy=RetryPolicy(max_attempts=2)
-    )
-    builder.add_node("search", search)
-    builder.add_node(
-        "extract", extract, retry_policy=RetryPolicy(max_attempts=2)
-    )
-    builder.add_node("evaluate", evaluate)
-    builder.add_node("next_section", next_section)
-    builder.add_node(
-        "synthesize", synthesize, retry_policy=RetryPolicy(max_attempts=2)
-    )
-    builder.add_node("reflect", reflect)
-    builder.add_node("revise", revise)
-    builder.add_node("output_formatter", output_formatter)
+    builder.add_node("ingest", ingest)
+    builder.add_node("single_pass", single_pass, retry_policy=_llm_retry)
+    builder.add_node("section_worker", section_worker, retry_policy=_llm_retry)
+    builder.add_node("assemble", assemble)
+    builder.add_node("consistency", consistency)
+    builder.add_node("finalize", finalize)
 
-    # --- エッジ定義 ---
+    builder.add_edge(START, "ingest")
 
-    # 入力 → 計画
-    builder.add_edge(START, "input_adapter")
-    builder.add_edge("input_adapter", "plan")
-
-    # Agentic Search ループ
-    builder.add_edge("plan", "search")
-    builder.add_edge("search", "extract")
-    builder.add_edge("extract", "evaluate")
-
-    # evaluate → 再検索 or 次セクション
+    # 入力規模で分岐: single_pass（≤閾値）or section_worker への Send（>閾値）
     builder.add_conditional_edges(
-        "evaluate",
-        evaluate_sufficiency,
-        {"search": "search", "next_section": "next_section"},
+        "ingest",
+        route_and_fanout,
+        ["single_pass", "section_worker"],
     )
 
-    # next_section → 次セクション or 統合
+    # single_pass 後: 欠損セクションのみ section_worker、無ければ assemble
     builder.add_conditional_edges(
-        "next_section",
-        has_more_sections,
-        {"plan": "plan", "synthesize": "synthesize"},
+        "single_pass",
+        after_single_pass,
+        ["section_worker", "assemble"],
     )
 
-    # 統合 → Reflection
-    builder.add_edge("synthesize", "reflect")
+    # section_worker 完了（reducer 集約）→ assemble
+    builder.add_edge("section_worker", "assemble")
 
-    # Reflection ループ
-    builder.add_conditional_edges(
-        "reflect",
-        should_continue_reflection,
-        {"revise": "revise", "output_formatter": "output_formatter"},
-    )
-    builder.add_edge("revise", "reflect")
-
-    # 出力
-    builder.add_edge("output_formatter", END)
+    builder.add_edge("assemble", "consistency")
+    builder.add_edge("consistency", "finalize")
+    builder.add_edge("finalize", END)
 
     return builder.compile()

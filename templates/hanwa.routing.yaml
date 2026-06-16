@@ -1,0 +1,41 @@
+# 阪和病院テンプレートの section -> 記録カテゴリ・キーワード routing。
+# categories は RecordCategory の enum 値で記述し、ingest が CATEGORY_LABELS で
+# 日本語ラベルへ解決してから grep_index と突合する（grep アンカーはラベル）。
+# mode: extractive（カテゴリ span のみ供給）/ synthetic（全日付チャンク供給）。
+
+sections:
+  instruction:
+    mode: extractive
+    categories: [discharge_support, nursing_note]
+    keywords: ["指導", "説明", "教育", "パンフレット"]
+    required_items: []
+
+  medical_equipment:
+    mode: extractive
+    categories: [procedure, medication, vital_sign]
+    keywords: ["カテーテル", "ドレーン", "挿入", "装着", "酸素", "点滴"]
+    required_items: []
+
+  nursing_process:
+    mode: synthetic
+    categories: [nursing_note, vital_sign, adl, nursing_problem]
+    keywords: []
+    required_items: []
+
+  patient_condition:
+    mode: extractive
+    categories: [nursing_note, discharge_support]
+    keywords: ["説明", "受け止め", "理解", "病状", "本人", "家族"]
+    required_items: []
+
+  risks:
+    mode: synthetic
+    categories: [nursing_problem, risk_assessment, infection, allergy, discharge_support]
+    keywords: ["継続", "リスク", "転倒", "再発", "注意"]
+    required_items: []
+
+  others:
+    mode: extractive
+    categories: [incident, lab_result]
+    keywords: []
+    required_items: []

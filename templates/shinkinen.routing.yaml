@@ -1,0 +1,24 @@
+# 新記念病院テンプレートの section -> 記録カテゴリ・キーワード routing。
+# categories は RecordCategory の enum 値（ingest が日本語ラベルへ解決）。
+
+sections:
+  progress:
+    mode: synthetic
+    categories:
+      [
+        encounter,
+        vital_sign,
+        nursing_note,
+        nursing_problem,
+        adl,
+        procedure,
+        medication,
+      ]
+    keywords: []
+    required_items: []
+
+  remarks:
+    mode: extractive
+    categories: [discharge_support, risk_assessment]
+    keywords: ["退院後", "外来", "通院", "サービス", "注意", "継続"]
+    required_items: []

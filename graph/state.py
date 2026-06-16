@@ -1,65 +1,63 @@
-"""LangGraph State 定義モジュール。
+"""LangGraph State 定義（v2: agentic search 再設計）。
 
-Agentic Search パイプラインのグラフ状態を TypedDict で定義する。
-Annotated + reducer で並列ノードの結果結合戦略を制御する。
+入力規模に応じて single-pass（≤閾値で全セクション1回生成）と
+section-routed map（>閾値でセクション単位）を切り替えるグラフの状態。
+詳細設計: docs/agentic-search-redesign.md を参照。
 """
 
+from operator import add
 from typing import Annotated, Optional, TypedDict
 
 
-def merge_dicts(left: dict, right: dict) -> dict:
-    """セクション結果を蓄積するカスタム reducer。
+def merge_sections(left: dict, right: dict) -> dict:
+    """section_key 単位で結果を集約する reducer。
 
-    複数ノードから同じセクションに情報が追加される場合、
-    既存の情報に追記する形でマージする。
+    各 section_worker は自分の section_key だけを書くため衝突しない。
+    single-pass の結果を section_worker の再生成で上書きする用途にも使う。
     """
-    merged = {**left}
-    for key, value in right.items():
-        if key in merged and merged[key]:
-            merged[key] = merged[key] + "\n" + value
-        else:
-            merged[key] = value
-    return merged
+    return {**left, **right}
 
 
-class NursingSummaryState(TypedDict):
-    """看護サマリー生成グラフのメイン状態。"""
+class SectionResult(TypedDict):
+    """1セクションの生成結果。
+
+    Attributes:
+        section_key: テンプレートのセクションキー。
+        body: セクション本文。
+        cited_dates: 本文が根拠とした日付（YYYYMMDD）。
+        missing: 未充足のカテゴリ・項目（finalize で明示・review 対象）。
+        review_flag: 人手レビューが必要か。
+    """
+
+    section_key: str
+    body: str
+    cited_dates: list[str]
+    missing: list[str]
+    review_flag: bool
+
+
+class GlobalState(TypedDict):
+    """看護サマリー生成グラフ（v2）のメイン状態。"""
 
     # --- 入力 ---
     patient_id: str
     raw_context: str
     hospital: str
-
-    # --- チャンキング・検索インデックス ---
-    chunks: list[str]
-    chunk_index: list[dict]
-
-    # --- サマリヘッダ（日付に紐づかない患者横断情報・常時供給） ---
-    summary_header: str
-
-    # --- テンプレート ---
     template_id: str
+
+    # --- ingest 成果物 ---
     template: dict
+    routing: dict
+    summary_header: str
+    chunks: list[str]
+    grep_index: list[dict]
+    total_tokens: int
 
-    # --- Agentic Search ---
-    search_plan: list[dict]
-    section_results: Annotated[dict[str, str], merge_dicts]
-    current_section_idx: int
-    search_iteration: int
-    max_search_iterations: int
-
-    # --- 検索中間結果（ノード間受け渡し用） ---
-    _search_results: list[str]
-
-    # --- 統合生成 ---
-    draft_summary: str
-
-    # --- Reflection ---
-    reflection_feedback: str
-    reflection_approved: bool
-    iteration_count: int
-    max_iterations: int
+    # --- セクション結果（並列集約） ---
+    section_results: Annotated[dict[str, SectionResult], merge_sections]
 
     # --- 出力 ---
+    draft_summary: str
     final_summary: str
+    review_flags: Annotated[list[str], add]
     error: Optional[str]
