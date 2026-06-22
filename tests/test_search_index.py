@@ -93,6 +93,35 @@ def test_execute_search_tool_keyword():
     assert any("息苦しい" in r for r in results)
 
 
+def test_execute_search_tool_category():
+    """補完検索の category ツールがラベル一致スパンを全件返すこと。
+
+    routing に静的定義されていないカテゴリを LLM が実行時に指定して拾える
+    （カテゴリ越境対策）ことを確認する。
+    """
+    chunks, index = _db_chunks()
+    spans = explode_to_spans(chunks, index)
+    results = execute_search_tool(
+        "category", {"category": "バイタルサイン"}, spans
+    )
+    # 2日分のバイタルサインが両方回収される
+    assert any("37.8℃" in r for r in results)
+    assert any("36.6℃" in r for r in results)
+    # 看護記録カテゴリは含まれない
+    assert not any("息苦しい" in r for r in results)
+
+
+def test_execute_search_tool_category_empty():
+    """category 引数が空・未知ラベルなら空を返すこと。"""
+    chunks, index = _db_chunks()
+    spans = explode_to_spans(chunks, index)
+    assert execute_search_tool("category", {"category": ""}, spans) == []
+    assert (
+        execute_search_tool("category", {"category": "存在しない"}, spans)
+        == []
+    )
+
+
 def test_execute_search_tool_date_range():
     """補完検索の date_range ツールが期間内スパンを返すこと。"""
     chunks, index = _db_chunks()

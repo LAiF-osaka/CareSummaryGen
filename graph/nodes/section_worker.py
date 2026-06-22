@@ -5,13 +5,15 @@ GlobalState.section_results に {section_key: SectionResult} を返す
 （reducer がマージ）。
 
   1. collect()            … 決定論的全件収集（安全網・LLM不使用）
-  2. supplemental_search  … LLM が不足を判断し追加クエリを動的生成（agentic 部分）
+  2. supplemental_search  … 観測駆動 agentic 補完検索（manual ReAct ループ）
   3. _extract()           … 本文生成（空なら最大 MAX_REFILL 回再試行）
   4. absent_categories()  … 決定論的網羅点検（LLMの停止判断に依存しない）
 
-LLM のクエリ生成・停止判断は agentic だが、grep 実行と網羅点検は決定論で、
-反復上限・新規スパンゼロ検出・収集の先行・点検の後行という決定論ガードレールで
-囲む（verifier-in-the-loop）。詳細: docs/agentic-search-redesign.md。
+②は LLM が観測（カバレッジ・検索履歴）→ 不足同定 → クエリ動的生成 → 言い換えを
+反復し、collect() が routing 固定で取りこぼす同義語・含意・カテゴリ越境を埋める。
+grep 実行・状態更新・停止判定は決定論で、停止の最終決定権は決定論側（LLM の
+need_more は助言）。反復上限・進捗ゼロ検出・収集の先行・点検の後行という決定論
+ガードレールで囲む（verifier-in-the-loop）。詳細: docs/agentic-search-redesign.md。
 """
 
 from config.settings import LARGE_NUM_CTX, MAX_REFILL, MAX_SEARCH_STEPS
@@ -34,12 +36,17 @@ _EXTRACT_SCHEMA = {
     "required": ["body"],
 }
 
+# 浅いフラット schema（gpt-oss の構造化出力安定化）。satisfied/missing で
+# gap 分析（充足判定）を外在化し、tool/引数で次の1手を指示させる。
 _SUPPLEMENT_SCHEMA = {
     "type": "object",
     "properties": {
+        "satisfied_points": {"type": "array", "items": {"type": "string"}},
+        "missing_points": {"type": "array", "items": {"type": "string"}},
         "need_more": {"type": "boolean"},
         "tool": {"type": "string"},
         "keyword": {"type": "string"},
+        "category": {"type": "string"},
         "start_date": {"type": "string"},
         "end_date": {"type": "string"},
         "reason": {"type": "string"},
@@ -66,8 +73,10 @@ def section_worker(payload: dict) -> dict:
     # 1. 決定論的全件収集（安全網）
     collected, present_labels, _dates = collect(entry, grep_index, chunks)
 
-    # 2. LLM 補完検索ループ（agentic 部分・決定論ガードレール内）
-    collected = _supplemental_search(section, entry, collected, grep_index)
+    # 2. 観測駆動 agentic 補完検索（決定論ガードレール内・監査トレース付き）
+    collected, search_trace = _supplemental_search(
+        section, entry, collected, grep_index
+    )
 
     # synthetic は全チャンク供給で num_ctx を拡張する
     override = (
@@ -77,7 +86,8 @@ def section_worker(payload: dict) -> dict:
     )
 
     # 3. 生成（本文が空なら決定論カウンタで再試行）
-    body, cited = "", []
+    body: str = ""
+    cited: list[str] = []
     for _attempt in range(MAX_REFILL + 1):
         body, cited = _extract(section, collected, summary_header, override)
         if body.strip():
@@ -96,6 +106,7 @@ def section_worker(payload: dict) -> dict:
                 cited_dates=cited,
                 missing=absent,
                 review_flag=review,
+                search_trace=search_trace,
             )
         }
     }
@@ -106,65 +117,213 @@ def _supplemental_search(
     entry: dict,
     collected: list[str],
     grep_index: list[dict],
-) -> list[str]:
-    """LLM が不足を判断し追加検索クエリを動的生成する補完ループ。
+) -> tuple[list[str], list[dict]]:
+    """観測駆動の agentic 補完検索ループ（manual ReAct）。
 
-    クエリ生成と停止判断は LLM（agentic）、grep 実行は決定論。
-    決定論ガードレール: 反復上限 MAX_SEARCH_STEPS、新規スパンゼロで停止、
-    chat_json 失敗（None）でループを抜けて決定論モードへフォールバック。
+    決定論収集 collect() は routing 固定の categories/keywords しか集めないため、
+    同義語・略語・言い換え・含意・カテゴリ越境で取りこぼしが生じる。本ループは
+    LLM が「収集状況を観測 → 不足を同定 → 不足を埋める検索を1手指示 → 結果を観測
+    → 言い換え」を反復してこの穴を実行時推論で埋める。grep 実行・状態更新・停止
+    判定はコード側（決定論）で、LLM の役割は観測を読み次クエリ JSON を出すことに
+    限定する（不安定要素を JSON 1個のパースに局所化）。
 
-    synthetic（全チャンク供給）は補完不要のためスキップする。
+    本物の agentic search の受入基準（docs/agentic-search-redesign.md）:
+        観測閉路（coverage/history を毎回注入）・gap 駆動停止（missing_points）・
+        観測駆動の再定式化（tried_queries・ゼロ件で即停止しない）・決定論ガード
+        レール（停止の最終決定権は決定論側・LLM の need_more は助言）・トレース。
+
+    停止条件（決定論 OR）: missing 空かつ need_more=false / 反復上限 / 進捗ゼロ
+    連続2回 / chat_json None（フォールバック）。synthetic は全チャンク供給で補完
+    不要のためスキップする。
 
     Args:
         section: テンプレートのセクション定義。
         entry: routing のセクションエントリ。
         collected: 決定論収集済みの evidence テキスト。
-        grep_index: スパン索引。
+        grep_index: スパン索引（{date, category_label, text}）。
 
     Returns:
-        補完を加えた evidence テキストのリスト。
+        (補完を加えた evidence テキストのリスト, 監査トレース).
+        トレースは各ステップの観測・クエリ・追加件数・停止理由を含む。
     """
+    # synthetic は全チャンク供給で最も網羅的なため補完しない。
     if entry.get("mode") == "synthetic":
-        return collected
+        return collected, []
 
     available_categories = sorted(
         {s["category_label"] for s in grep_index if s["category_label"]}
     )
     available_dates = sorted({s["date"] for s in grep_index if s.get("date")})
-    seen = set(collected)
+    # 観測のカバレッジ集計用に text→span を引けるようにする。
+    text_to_span = {s["text"]: s for s in grep_index}
 
-    for _step in range(MAX_SEARCH_STEPS):
+    seen = set(collected)
+    tried: set[str] = set()  # 既出クエリ（reformulation の重複排除）
+    trace: list[dict] = []
+    initial_count = len(collected)
+    no_progress = 0
+    stop_reason = "max_steps"  # ループを抜けず上限到達した場合の既定
+
+    for step in range(MAX_SEARCH_STEPS):
+        # --- 観測（ReAct の Observation。決定論集計をプロンプトへ再投入） ---
         prompt = SUPPLEMENT_PROMPT.format(
             section_name=section["name"],
             section_description=section.get("description", ""),
-            collected_summary=_summarize_collected(collected),
+            coverage=_coverage_report(collected, text_to_span),
+            history=_format_history(trace),
+            tried_queries="、".join(sorted(tried)) or "なし",
             available_categories="、".join(available_categories) or "なし",
             available_dates="、".join(available_dates) or "なし",
         )
         decision = chat_json(prompt, _SUPPLEMENT_SCHEMA)
-        if not decision or not decision.get("need_more"):
-            break  # LLM の停止判断、または構造化出力失敗（フォールバック）
+
+        # --- 停止判定（最終決定権は決定論側） ---
+        if decision is None:
+            # 構造化出力失敗 → 決定論モードへフォールバック。
+            stop_reason = "json_fail"
+            break
+        missing = [str(m) for m in decision.get("missing_points", []) if m]
+        if not decision.get("need_more") and not missing:
+            # gap 駆動の充足判定（missing 空かつ LLM が十分と判断）。
+            stop_reason = "needs_satisfied"
+            break
 
         tool = str(decision.get("tool", "")).strip()
+        query = _query_value(tool, decision)
+        if not tool or not query:
+            # 不足ありだがクエリ未指定。これ以上進めない（進捗ゼロ扱い）。
+            no_progress += 1
+            trace.append(
+                {
+                    "step": step,
+                    "missing": missing,
+                    "added_count": 0,
+                    "note": "no_query",
+                }
+            )
+            if no_progress >= 2:
+                stop_reason = "no_progress"
+                break
+            continue
+
+        qkey = f"{tool}:{query}"
+        if qkey in tried:
+            # 繰り返し検出 → 即停止せず言い換えを1手促す（reformulation）。
+            no_progress += 1
+            trace.append(
+                {
+                    "step": step,
+                    "tool": tool,
+                    "query": query,
+                    "added_count": 0,
+                    "duplicate": True,
+                }
+            )
+            if no_progress >= 2:
+                stop_reason = "no_progress"
+                break
+            continue
+        tried.add(qkey)
+
+        # --- アクション（grep 実行は決定論） ---
         new_spans = execute_search_tool(tool, decision, grep_index)
         added = [s for s in new_spans if s not in seen]
+        trace.append(
+            {
+                "step": step,
+                "tool": tool,
+                "query": query,
+                "hit_count": len(new_spans),
+                "added_count": len(added),
+                "missing": missing,
+                "reason": str(decision.get("reason", "")),
+            }
+        )
         if not added:
-            break  # 限界効用ゼロ（決定論ガードレール）
+            # ゼロ進捗 → 即停止せず言い換えの機会を与える（R4）。連続2回で停止。
+            no_progress += 1
+            if no_progress >= 2:
+                stop_reason = "no_progress"
+                break
+            continue
+        no_progress = 0
         collected = collected + added
         seen.update(added)
 
-    return collected
+    # 監査用に最終サマリ（停止理由・coverage delta）を残す。
+    trace.append(
+        {
+            "final": True,
+            "stop_reason": stop_reason,
+            "coverage_delta": len(collected) - initial_count,
+        }
+    )
+    return collected, trace
 
 
-def _summarize_collected(collected: list[str]) -> str:
-    """収集済み evidence を補完判断用に要約する（先頭行の列挙）。"""
+def _coverage_report(
+    collected: list[str], text_to_span: dict[str, dict]
+) -> str:
+    """収集済み evidence のカバレッジを観測材料として整形する。
+
+    collected テキストを grep_index のスパンに引き戻し、category_label 別件数と
+    収集済み日付範囲を箇条書きで返す（決定論集計。LLM が「どこが薄いか」を見る）。
+
+    Args:
+        collected: 収集済み evidence テキスト。
+        text_to_span: text→span の逆引き（カテゴリ・日付の復元用）。
+
+    Returns:
+        カテゴリ別件数・日付範囲の箇条書き文字列。
+    """
     if not collected:
         return "（まだ何も収集していない）"
-    heads = []
-    for text in collected[:12]:
-        first = text.strip().split("\n", 1)[0]
-        heads.append(f"- {first}")
-    return "\n".join(heads)
+    by_category: dict[str, int] = {}
+    dates: set[str] = set()
+    for text in collected:
+        span = text_to_span.get(text)
+        if span and span.get("category_label"):
+            label = span["category_label"]
+        else:
+            # 補完取得スパンや label=None は別枠で件数を示す。
+            label = "（カテゴリ未分類/補完取得）"
+        by_category[label] = by_category.get(label, 0) + 1
+        if span and span.get("date"):
+            dates.add(span["date"])
+    lines = [f"- {cat}: {n}件" for cat, n in sorted(by_category.items())]
+    if dates:
+        lines.append(
+            f"- 収集済み日付: {min(dates)}〜{max(dates)}（{len(dates)}日分）"
+        )
+    return "\n".join(lines)
+
+
+def _format_history(trace: list[dict]) -> str:
+    """直近3手の実行済み検索結果を観測材料として整形する。"""
+    executed = [t for t in trace if t.get("query") and "added_count" in t]
+    if not executed:
+        return "（まだ検索していない）"
+    lines = []
+    for t in executed[-3:]:
+        if t.get("hit_count", t.get("added_count", 0)) == 0:
+            result = "ゼロ件"
+        else:
+            result = f"{t['added_count']}件追加"
+        lines.append(f"- {t['tool']}「{t['query']}」→ {result}")
+    return "\n".join(lines)
+
+
+def _query_value(tool: str, decision: dict) -> str:
+    """ツール別のクエリ代表値を取り出す（重複検出・履歴表示用）。"""
+    if tool == "keyword":
+        return str(decision.get("keyword", "")).strip()
+    if tool == "category":
+        return str(decision.get("category", "")).strip()
+    if tool == "date_range":
+        start = str(decision.get("start_date", "")).strip()
+        end = str(decision.get("end_date", "")).strip()
+        return f"{start}-{end}" if start and end else ""
+    return ""
 
 
 def _extract(

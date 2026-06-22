@@ -125,7 +125,7 @@ START
 - `ingest`: `load_template` / `load_routing`、`_extract_summary_header` で `summary_header`、`_build_search_index` で `chunks`、`explode_to_spans` で `grep_index`（`{date, category_label, text}`）、`tiktoken` で `total_tokens`。
 - `route_and_fanout`（`graph/edges/routing_v2.py`）: `total_tokens ≤ 閾値` → `single_pass`、超 → 全セクションを `Send` で並列。
 - `single_pass`: 全セクション + `summary_header` + 全 `chunks` を1プロンプトで `chat_json`（`think=False`, `num_ctx=LARGE_NUM_CTX`）。
-- `section_worker`: `collect`（決定論的全件収集）→ `supplemental_search`（LLM が不足判断＋追加クエリ動的生成・最大 `MAX_SEARCH_STEPS`）→ `_extract`（`chat_json`、本文が空なら最大 `MAX_REFILL` 回再試行）→ `absent_categories` で欠落明示（§3.3 ハイブリッド）。
+- `section_worker`: `collect`（決定論的全件収集）→ `supplemental_search`（**観測駆動の agentic ループ**: LLM が収集状況を観測し不足を同定→追加クエリを動的生成→言い換え、決定論ガードレールで停止・最大 `MAX_SEARCH_STEPS`）→ `_extract`（`chat_json`、本文が空なら最大 `MAX_REFILL` 回再試行）→ `absent_categories` で欠落明示（§3.3 ハイブリッド）。
 - `assemble`: `section_delimiter`（`--- {name} ---`）で決定論組立。空は `"記録なし（要確認）"`。
 - `consistency`: `chat_json` で claim 分解→主要トークンの過半が `grep_index`＋`summary_header` に含まれるか決定論照合。未支持を `review_flags`（自動修復しない）。
 - `finalize`: `final_summary = draft_summary`、`review_flag` 立ちセクションを集約。
@@ -139,11 +139,11 @@ START
 | 段階 | 実装 | LLM | 性質 |
 |---|---|---|---|
 | ① 決定論収集 | `collect()` … カテゴリ全件収集（top-k 制限なし）＋ keyword grep | なし | 安全網（必須カテゴリを悉皆で確保） |
-| ② LLM 補完検索ループ | `supplemental_search()` … LLM が不足を判断し追加クエリ（keyword / date_range）を**動的生成**、grep で実行、新規スパンを追加 | あり | agentic（クエリ生成と停止判断を LLM が行う。grep 実行は決定論） |
+| ② LLM 補完検索ループ | `supplemental_search()` … 観測駆動の manual ReAct ループ。LLM が収集状況（カバレッジ・検索履歴）を観測→不足を同定→追加クエリ（keyword / category / date_range）を**動的生成**→言い換え、grep で実行、新規スパンを追加 | あり | agentic（不足同定・クエリ生成・停止判断を LLM が観測に基づき行う。grep 実行は決定論） |
 | ③ 生成 | `single_pass` / `section_worker._extract`（LLM が本文を生成） | あり | — |
 | ④ 決定論点検 | `absent_categories`（記録に無いカテゴリを検出）、`consistency`（生成後に記録と照合） | なし(absent)/あり(claim分解) | 決定論ガードレール |
 
-**決定論ガードレール**（②の暴走・gpt-oss 破損を遮断）: ハード反復上限 `MAX_SEARCH_STEPS`、新規スパンゼロ検出で停止、`collect()` の全件収集が②に先行（安全網）、`absent_categories` が②の後で網羅点検（LLM の停止判断に依存しない）。`chat_json` が失敗（None）すれば②を飛ばして①のみで続行する（グレースフル・フォールバック＝決定論モード）。
+**決定論ガードレール**（②の暴走・gpt-oss 破損を遮断・**停止の最終決定権は決定論側**で LLM の `need_more` は助言）: ハード反復上限 `MAX_SEARCH_STEPS`、進捗ゼロ（新規スパン0）連続2回で停止、同一クエリ繰り返し検出、`collect()` の全件収集が②に先行（安全網）、`absent_categories` が②の後で網羅点検（LLM の停止判断に依存しない）。`chat_json` が失敗（None）すれば②を飛ばして①のみで続行する（グレースフル・フォールバック＝決定論モード）。各ステップの観測・クエリ・停止理由は `SectionResult.search_trace` に記録（監査可能性）。
 
 `single_pass`（≤閾値）は全チャンクを供給するため②は不要。②は section_worker（>閾値 / 欠損セクション）のみに適用する。
 
@@ -193,31 +193,60 @@ collect("medical_equipment") の例:
 
 routing が要求するが記録に存在しないカテゴリ（`target_labels − present_labels`）を返す。記録自体に無いカテゴリは grep しても得られないため、`section_worker` は欠落として `missing` に記録し `review_flag` を立てる（assemble で「記録なし（要確認）」、finalize で `review_flags`）。
 
-#### (e) LLM 補完検索ループ — `supplemental_search()`（section_worker 内・agentic 部分）
+#### (e) LLM 補完検索ループ — `supplemental_search()`（section_worker 内・本物の agentic search）
 
-①の決定論収集の後、LLM が「このセクションに不足情報があるか」を判断し、不足なら追加の検索クエリ（keyword または date_range）を**動的に生成**する。grep は決定論実行し、新規スパンを evidence に追加する。
+①の決定論収集は routing に静的固定された categories/keywords しか集めない。これだけでは**語彙のミスマッチ**（同義語・略語・言い換え）、**含意**（降圧薬名から高血圧の記録を引く等）、**カテゴリ越境**（リスク情報が看護記録 S 欄に埋まる等）で取りこぼしが生じる（EHR エンティティ検索の実測で含意マッチ BM25 MRR=36.30%、完全一致 83.92% と47pt差: [arXiv:2502.06252](https://arxiv.org/html/2502.06252v1)）。②はこの穴を**実行時の LLM 推論で埋める**。LLM は「収集状況を観測 → 不足を同定 → 不足を埋める検索を1手指示 → 結果を観測 → 言い換え」を反復する（ReAct ループ）。これが「飾り」でなく本物の agentic search である根拠を、各ステップの観測材料・動的判断・決定論ガードレールで担保する。
+
+**観測材料（毎ステップ LLM に再投入。ReAct の Observation）**:
+- **セクション目標**: `name` / `description`。
+- **収集済みカバレッジ**: `collected` を `category_label` で集計した「カテゴリ別件数・収集済み日付範囲」（決定論計算）。LLM が「どこが薄いか」を見る。
+- **検索履歴**: 直近3手の `{tool, query, 追加件数 / ゼロ件}`。
+- **既出クエリ集合**: 同一クエリの再発行を禁止（言い換えを促す）。
+- **記録全体の地図**: 検索可能な全カテゴリ・全日付。
 
 ```python
-for step in range(MAX_SEARCH_STEPS):                 # ハード上限（フェイルセーフ）
-    decision = chat_json(SUPPLEMENT_PROMPT(section, 既収集の要約, 記録の地図), SCHEMA)
-    # decision = {"need_more": bool, "tool": "keyword"|"date_range"|"none", "keyword"/"start_date"/"end_date"}
-    if not decision["need_more"]:                     # ← LLM の停止判断（agentic）
+for step in range(MAX_SEARCH_STEPS):                  # ハード上限（フェイルセーフ）
+    coverage = _coverage_report(collected, grep_index)        # 観測: カバレッジ（決定論集計）
+    history  = _format_history(trace)                         # 観測: 直近の検索結果
+    decision = chat_json(SUPPLEMENT_PROMPT(目標, coverage, history, 既出クエリ, 地図), SCHEMA)
+    # decision = {"satisfied_points": [...], "missing_points": [...],  ← gap 分析（充足/不足の同定）
+    #             "need_more": bool, "tool": "keyword"|"category"|"date_range",
+    #             "keyword"/"category"/"start_date"/"end_date", "reason": "..."}
+    if decision is None:                              # 構造化失敗 → 決定論へフォールバック
         break
-    new = execute_tool(decision, grep_index)          # grep 実行（決定論）
-    added = [s for s in new if s not in collected]
-    if not added:                                     # 限界効用ゼロ（決定論ガードレール）
+    if not decision["need_more"] and not decision["missing_points"]:   # gap 駆動の充足判定で停止
         break
-    collected += added
+    if query in tried_queries:                        # 繰り返し検出 → 言い換え促し（即停止しない）
+        no_progress += 1; (no_progress>=2 で停止); continue
+    new   = execute_search_tool(decision.tool, decision, grep_index)   # grep 実行（決定論）
+    added = [s for s in new if s not in seen]
+    trace.append(観測)                                # 監査トレース
+    if not added:                                     # ゼロ進捗 → 即停止せず言い換えの機会（R4）
+        no_progress += 1; (no_progress>=2 で停止); continue
+    no_progress = 0; collected += added; seen |= set(added)
 ```
 
-`chat_json` が失敗（None）した場合はループを抜け、①のみの決定論収集で続行する（グレースフル・フォールバック）。
+**停止条件（決定論 OR・LLM の `need_more` は助言）**: ① gap 充足（`missing_points` 空かつ `need_more=false`）/ ② ハード反復上限 `MAX_SEARCH_STEPS`（`for` で物理保証）/ ③ 進捗ゼロ連続2回（no-progress 検出）/ ④ `chat_json` None（フォールバック）。同一クエリ繰り返しは即停止せず1手スキップして言い換えを促す（reformulation）。
 
-#### 設計上の要点
+検索ツール: `keyword`（同義語・略語・関連語で部分文字列 grep）、`category`（routing 外カテゴリを LLM が動的指定して全件回収＝カテゴリ越境対策）、`date_range`（特定期間の取りこぼし補完）。実行は全て決定論（クエリは LLM・実行は決定論）。
 
-- **ハイブリッド**: ①決定論収集（安全網）＋②LLM補完検索（agentic）。クエリ生成と停止判断は LLM、grep 実行と網羅点検（`absent_categories`）は決定論。
+#### 設計上の要点（「本物の agentic search」受入基準）
+
+agentic search が「飾り」でなく本物である条件を、実装の受入基準として固定する（[Firecrawl / Search Engine Land 2026-01](https://searchengineland.com/beyond-rag-ai-search-agentic-content-478996)、[Anthropic 2025-12](https://www.anthropic.com/research/building-effective-agents)、[SIM-RAG arXiv:2505.02811](https://arxiv.org/html/2505.02811v1)）。
+
+| # | 受入基準 | 実装 |
+|---|---|---|
+| 1 | **観測ループが閉じる**: 直前アクションの結果が次の LLM 入力に入る | `coverage` / `history` を毎ステップ注入（ReAct Observation） |
+| 2 | **観測駆動の再定式化**: 結果に応じてクエリが変わる・繰り返さない | 既出クエリ集合の注入＋ゼロ件で即停止せず言い換え |
+| 3 | **gap 駆動の停止**: 不足を同定してから停止 | `missing_points` を列挙させ、空で充足停止 |
+| 4 | **決定論ガードレールが LLM 停止を囲う** | 反復上限・no-progress・フォールバックの OR |
+| 5 | **実行時に LLM が何を探すか決める** | `missing_points` と次クエリを観測から動的生成（routing 静的固定を補完） |
+| 6 | **トレースが残る（監査可能性）** | `SectionResult.search_trace` に観測・クエリ・停止理由を記録 |
+
+- **ハイブリッド（guarded agent）**: ①決定論収集（安全網・下限保証）＋②agentic 補完（上乗せ・破壊不能）＋④決定論点検。②の LLM は網羅を**上乗せ改善するだけで破壊できない**。前段 `collect()` 全件収集と後段 `absent_categories()` が LLM の挙動に依存せず網羅の下限と欠落明示を保証する（verifier-in-the-loop。医療の高ステークス要件: [EU AI Act 第14条](https://artificialintelligenceact.eu/article/14/)）。
 - **検索ヒット依存からの脱却**: カテゴリ全件収集が主経路（該当カテゴリの行は全て渡す）。`max_results` のような件数上限を設けない。②はそれを上乗せ補完するのみで、①の網羅を損なわない。
 - **患者横断情報の常時供給**: `summary_header`（アレルギー・感染症・看護問題等、§1.3）は検索に依存せず `single_pass` / `_extract` に常に渡る。
-- **決定論ガードレール**: 反復上限・新規スパンゼロ検出・収集の先行・欠落点検の後行により、②の LLM が早期停止/暴走しても網羅性は構造的に保たれる。
+- `single_pass`（≤閾値）は全チャンク供給のため②は不要。②は section_worker のみに適用する。
 
 ### 3.4 LLM 呼び出し（`llm/client.py`）
 

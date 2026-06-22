@@ -137,12 +137,16 @@ def execute_search_tool(
 
     ハイブリッド検索の補完ループ（agentic 部分）から呼ばれる。クエリ生成は
     LLM、実行（grep）は決定論。サポートするツール:
-        keyword: args["keyword"] を含むスパン（部分文字列・小文字無視）
-        date_range: args["start_date"] <= date <= args["end_date"] のスパン
+        keyword: args["keyword"] を含むスパン（部分文字列・小文字無視）。
+            同義語・略語・言い換えの取りこぼし（語彙ミスマッチ）を埋める。
+        category: args["category"] とラベル完全一致するスパンを全件回収。
+            routing に静的定義されていないカテゴリを LLM が実行時に指定して
+            拾える（カテゴリ越境対策）。
+        date_range: args["start_date"] <= date <= args["end_date"] のスパン。
 
     Args:
-        tool: "keyword" / "date_range"。
-        args: ツール引数（keyword / start_date / end_date）。
+        tool: "keyword" / "category" / "date_range"。
+        args: ツール引数（keyword / category / start_date / end_date）。
         grep_index: explode_to_spans の出力。
 
     Returns:
@@ -154,6 +158,16 @@ def execute_search_tool(
             return []
         low = keyword.lower()
         return [s["text"] for s in grep_index if low in s["text"].lower()]
+    if tool == "category":
+        category = str(args.get("category", "")).strip()
+        if not category:
+            return []
+        # ラベル完全一致で該当カテゴリのスパンを全件回収する。
+        return [
+            s["text"]
+            for s in grep_index
+            if s.get("category_label") == category
+        ]
     if tool == "date_range":
         start = str(args.get("start_date", "")).strip()
         end = str(args.get("end_date", "")).strip()

@@ -18,7 +18,7 @@ def merge_sections(left: dict, right: dict) -> dict:
     return {**left, **right}
 
 
-class SectionResult(TypedDict):
+class SectionResult(TypedDict, total=False):
     """1セクションの生成結果。
 
     Attributes:
@@ -27,6 +27,9 @@ class SectionResult(TypedDict):
         cited_dates: 本文が根拠とした日付（YYYYMMDD）。
         missing: 未充足のカテゴリ・項目（finalize で明示・review 対象）。
         review_flag: 人手レビューが必要か。
+        search_trace: 補完検索（agentic ②）の監査トレース。各ステップの観測・
+            クエリ・追加件数・停止理由を記録する（observability）。
+            single_pass や補完不要セクションでは空。
     """
 
     section_key: str
@@ -34,6 +37,7 @@ class SectionResult(TypedDict):
     cited_dates: list[str]
     missing: list[str]
     review_flag: bool
+    search_trace: list[dict]
 
 
 class GlobalState(TypedDict):

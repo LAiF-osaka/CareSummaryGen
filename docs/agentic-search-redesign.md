@@ -52,28 +52,55 @@ DB入力（`/ingest`）との接続は [db-input-design.md](db-input-design.md) 
 
 ### ハイブリッド（B）設計
 
-旧 C を土台に、agentic の核（**クエリ生成と停止判断を LLM が動的に行う**）を、決定論ガードレールの内側に追加する（verifier-in-the-loop / guarded agent）。
+旧 C を土台に、agentic の核（**観測 → 不足同定 → クエリ生成 → 言い換え → 停止判断を LLM が実行時に動的に行う**）を、決定論ガードレールの内側に追加する（verifier-in-the-loop / guarded agent）。詳細要件は後述「本物の agentic search 化（R1〜R10）」を正とする。
 
 ```
 section_worker（>閾値 / 欠損セクション経路）:
   1. collect()                       # 決定論的全件収集（安全網・現行維持）
-  2. supplemental_search loop        # ← agentic 部分（新規）
+  2. supplemental_search loop        # ← agentic 部分（観測駆動 manual ReAct）
        for step in range(MAX_SEARCH_STEPS):              # ハード上限（フェイルセーフ）
-         decision = chat_json(SUPPLEMENT_PROMPT, schema) # LLM が動的にクエリ生成・継続判断
-         if not decision.need_more: break                # LLM の停止判断
-         new = execute_search(decision)                  # grep 決定論実行
-         if no new spans: break                          # 限界効用ゼロ（決定論ガードレール）
+         obs = coverage_report(collected) + history(trace)  # 観測（決定論集計）を毎回再投入
+         decision = chat_json(SUPPLEMENT_PROMPT(obs, 既出クエリ, 地図), schema)
+         #   = {satisfied_points, missing_points, need_more, tool, query, reason}
+         if decision is None: break                      # 構造化失敗 → 決定論へフォールバック
+         if not need_more and not missing_points: break  # gap 駆動の充足判定で停止
+         if query in tried: 言い換え促し1手スキップ; continue   # 繰り返し検出（reformulation）
+         new = execute_search(decision)                  # grep 決定論実行（keyword/category/date_range）
+         trace.append(観測); 
+         if no new spans: no_progress+=1; (2連続で停止); continue  # ゼロ進捗（即停止しない）
          collected += new
   3. _extract()                      # 生成（本文が空なら最大 MAX_REFILL 再試行）
   4. absent_categories()             # 決定論的網羅点検（LLM 停止に依存しない・現行維持）
 ```
 
-- **agentic な点**: 補完検索のクエリ（keyword / date_range）を LLM が動的生成し、停止も LLM が判断する。grep 実行は決定論（Claude Code と同じく「クエリは LLM・実行は決定論」）。
-- **決定論ガードレール**: ハード反復上限、新規スパンゼロ検出、`collect()` の全件収集（先行・安全網）、`absent_categories` の網羅点検（後行・LLM 停止に非依存）。
+- **agentic な点**: 補完検索の不足同定（`missing_points`）・クエリ（keyword / category / date_range）・継続/停止を、LLM が**毎ステップの観測（カバレッジ・検索履歴）に基づき動的に行う**。grep 実行は決定論（Claude Code と同じく「クエリは LLM・実行は決定論」）。`category` ツールにより routing に静的固定されていないカテゴリも実行時に LLM が指定して回収できる（カテゴリ越境対策）。
+- **決定論ガードレール（停止の最終決定権は決定論側・LLM の `need_more` は助言）**: ハード反復上限、進捗ゼロ連続2回、同一クエリ繰り返し検出、`collect()` の全件収集（先行・安全網）、`absent_categories` の網羅点検（後行・LLM 停止に非依存）。
 - **フォールバック**: gpt-oss の構造化出力が失敗（`chat_json` が None）すれば補完ループをスキップし、決定論収集（C 相当）で続行する（グレースフル・フォールバック）。
+- **監査可能性**: 各ステップの観測・クエリ・追加件数・停止理由を `SectionResult.search_trace` に記録する。
 - `single_pass`（≤閾値）は全チャンクを供給するため補完検索は不要（最も網羅的）。補完検索は section_worker のみに適用。
 
 実装は §8 のスケッチを本設計で更新する。実行時フローの最新は [data-flow.md](data-flow.md) §3.3 を正とする。
+
+### 本物の agentic search 化（R1〜R10・2026-06）
+
+実装監査で「現補完ループは観測が閉じず（LLM に先頭行のみ渡し前回検索結果を返さない）、反復が浅く（2回）、routing 外を拾えない＝飾りの agentic」と判明したため、2025後半〜2026 の正準フロー・必須要件（[Anthropic 2025-12](https://www.anthropic.com/research/building-effective-agents)、[Agentic RAG Survey arXiv:2501.09136](https://arxiv.org/html/2501.09136v4)、[SIM-RAG arXiv:2505.02811](https://arxiv.org/html/2505.02811v1)、[Stop-RAG arXiv:2510.14337](https://arxiv.org/html/2510.14337v1)、[PRISM arXiv:2510.14278](https://arxiv.org/html/2510.14278v1)、[EHR semantic gap arXiv:2502.06252](https://arxiv.org/html/2502.06252v1)、[Firecrawl / Search Engine Land 2026-01](https://searchengineland.com/beyond-rag-ai-search-agentic-content-478996)）に基づき、②を次の要件で本物の agentic search に強化する。
+
+| 要件 | 内容 | 是正する旧実装の欠陥 |
+|---|---|---|
+| **R1 観測ループを閉じる** | 直前アクションの結果（tool/query/追加件数/ゼロ件）を観測として次の LLM 入力に毎回連結（ReAct の Observation） | LLM に `collected[:12]` 先頭行のみ渡し、前回検索結果を返さない |
+| **R2 実行時 plan** | セクション要件に対し「何が不足か」（`missing_points`）を LLM が観測から実行時に同定し、満たすたび更新 | routing の keyword が起動時固定（実行時 plan なし＝workflow） |
+| **R3 gap 駆動の充足判定** | `satisfied_points` / `missing_points` を列挙させてから停止（不足同定駆動） | 素朴な `need_more` yes/no |
+| **R4 観測駆動の再定式化** | ゼロ件で即停止せず、既出クエリ集合を見せて言い換えを促す。同一クエリ再発行を禁止 | `added` 空で即 break（reformulation なし） |
+| **R5 多重ガードレール** | 実 break は決定論 OR（上限・no-progress・繰り返し・フォールバック）。LLM 停止は助言に降格 | LLM 単独停止／上限2回と浅い |
+| **R6 前向き early-stop** | スコアでなく「未探索の探索空間（カテゴリ/日付）が残るか」で継続価値を判断 | 関連度スコア停止の危険（誤継続/早期停止） |
+| **R7 Critic 分離** | 充足判定 LLM を本文生成と別呼び出しに保ち、責務を「不足同定＋クエリ生成」に限定 | （現状分離済み・維持強化） |
+| **R8 observability** | 各ステップの観測・クエリ・停止理由を `search_trace` に記録 | 検索根拠の追跡証跡なし |
+| **R9 coverage delta** | `collect()` 後と補完後の coverage 差を記録し agentic ループの寄与を可視化 | 改善効果を検証不能 |
+| **R10 グレースフル・フォールバック** | `chat_json` None で補完を飛ばし `collect()` のみで続行（決定論が下限保証） | （現状 None で break・trace 記録を追加） |
+
+**gpt-oss で実装可能な形に限定**（非現実的手法の除外）: ネイティブ tool calling は使わない（`<|call|>` EOS 未登録バグ #12203）→ manual ReAct（モデルは1ターンの判断 JSON 1個のみ、ループ制御はコード側）。RL controller（Stop-RAG/EviOmni の学習型停止）はローカル gpt-oss で学習不可 → 停止原理を**決定論ヒューリスティック（探索空間被覆）**で近似。深いネスト JSON は成功率低下 → **浅いフラット schema** + `extract_json` + bounded retry。観測は JSON でなく**箇条書きの scratchpad** で注入（gpt-oss に安定）。
+
+**受入基準（飾り vs 本物）**: 次の6項目を全て満たすまで「agentic search」と称さない（モック LLM で決定論検証・実機不要。§10）。① 観測閉路 ② 再定式化 ③ gap 駆動停止 ④ 決定論ガードレールが LLM 停止を囲う ⑤ 実行時に LLM が探索対象を決める ⑥ トレースが残る。
 
 ---
 
@@ -203,10 +230,11 @@ section_worker（>閾値 / 欠損セクション経路）:
 
 | 判断点 | 完了条件（OR） |
 |---|---|
-| section_worker 内部ループ | (a) evidence 充足 かつ body 充足、OR (b) `refill_count >= 1`（ハード上限）、OR (c) refill しても `collected` span 集合のハッシュが不変（限界効用ゼロ） |
+| **supplemental_search ループ**（②agentic 補完） | (a) gap 充足（`missing_points` 空 かつ LLM `need_more=false`）、OR (b) `step >= MAX_SEARCH_STEPS`（ハード上限・`for` で物理保証）、OR (c) 進捗ゼロ（新規スパン0）連続2回、OR (d) `chat_json` None（フォールバック）。同一クエリ繰り返しは即停止せず1手スキップして言い換えを促す | 
+| section_worker 内部ループ（③生成 refill） | (a) evidence 充足 かつ body 充足、OR (b) `refill_count >= 1`（ハード上限）、OR (c) refill しても `collected` span 集合のハッシュが不変（限界効用ゼロ） |
 | 全体完了 | 全 section_worker 完了。`consistency` は未支持 claim をフラグ化するのみで再生成ループを作らない |
 
-- `verify` は **LLM を使わない純照合関数**。gpt-oss の構造化不安定性を停止経路から完全排除する。
+- **停止の最終決定権は決定論側**。LLM の `need_more` は助言で、実 break は上記 OR で制御する（gpt-oss の構造化不安定性を停止経路から排除）。`verify`（refill 起点）は **LLM を使わない純照合関数**。
 
 ---
 
@@ -238,6 +266,7 @@ class ExtractResult(BaseModel):
 
 - tool calling は使わない（`<|call|>` EOS 未登録バグ）。format schema + プロンプト指定に統一。
 - temperature=0。繰り返しトークン検出時のみ 0.1–0.2 へ。
+- **補完検索（agentic ②）の構造化安定化**: schema は浅いフラット構造（`satisfied_points` / `missing_points` / `need_more` / `tool` / `keyword` / `category` / `start_date` / `end_date` / `reason`）。観測材料（カバレッジ・検索履歴・既出クエリ・記録の地図）は JSON でなく**箇条書きの scratchpad** として `SUPPLEMENT_PROMPT` に注入する（JSON を読ませるより gpt-oss に安定）。LLM の役割は「観測を読む → 不足同定 → 次クエリ JSON 1個」に限定し、grep 実行・状態更新・停止判定はコード側に置く（不安定要素を JSON 1個のパースに局所化）。
 
 ---
 
@@ -461,7 +490,8 @@ sections:
 
 - **契約テスト（最重要・レビュー反映 R2/R3 #1）**: 全 routing の `categories` が `RecordCategory` メンバかつ `CATEGORY_LABELS` にキー存在。`ingest` の enum→ラベル解決後に grep_index と突合してヒットすること。
 - **非DB入力テスト（R3 #2）**: 小見出しの無い `data/test_sample1.md` 等で `_explode_to_spans` が label=None フォールバックし、keyword grep / synthetic でカバレッジが破綻しないこと。
-- **ユニット**: `_collect` カテゴリ全件収集（取りこぼし0）、`verify` 二段（evidence/body）、内部ループ終了（充足/上限/ハッシュ不変）、`assemble` 欠損明示、`global_repair_count` の並列加算。
+- **ユニット**: `_collect` カテゴリ全件収集（取りこぼし0）、`verify` 二段（evidence/body）、内部ループ終了（充足/上限/ハッシュ不変）、`assemble` 欠損明示、`global_repair_count` の並列加算。`execute_search_tool` の `category` ツール（routing 外カテゴリの全件回収）。
+- **本物の agentic search 受入テスト（モック LLM・実機不要。§ハイブリッド設計の受入基準6項目）**: ① 観測閉路（`coverage` / `history` がプロンプトに含まれる）② 再定式化（ゼロ件クエリの後に異なるクエリ生成・既出重複排除）③ gap 駆動停止（`missing_points` 空で停止/非空で継続）④ ガードレール（`need_more=true` 連発でも `MAX_SEARCH_STEPS` で停止）⑤ 実行時 plan（`missing_points` を観測から動的生成）⑥ トレース（`search_trace` に観測・停止理由記録、`chat_json` None で `collect()` 網羅性が落ちない）。6項目全 Yes まで「agentic search」と称さない。
 - **E2E（mocked LLM）**: hanwa 6 / shinkinen 2 セクション全出力、空セクションが「記録なし（要確認）」、review_flags 起動、single-pass（≤TH）と fanout（>TH）の両経路。
 - **E2E（real Ollama）**: `think=False`+format で extract が JSON パース成功（reasoning 混入で失敗しない）。Cloud で format 非強制でも `extract_json()`+retry で復旧。
 - **回帰**: `data/test_sample1.md` 等で v1 と v2 の出力を並置し、カテゴリ取りこぼしが v2 で減ること。

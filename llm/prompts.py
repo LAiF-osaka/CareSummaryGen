@@ -58,37 +58,54 @@ reasoning には判断根拠、body にはセクション本文、cited_dates �
 {{"reasoning": "...", "body": "...", "cited_dates": ["YYYYMMDD"]}}
 """
 
-# --- section_worker: LLM補完検索（ハイブリッドの agentic 部分） ---
+# --- section_worker: 観測駆動 agentic 補完検索（manual ReAct ループ） ---
+# LLM は本文を書かない。観測（収集状況・検索履歴）を読み、不足を同定し、
+# 不足を埋める検索を1手だけ指示する。grep 実行・停止判定はコード側（決定論）。
 SUPPLEMENT_PROMPT = """あなたは医療記録の検索エージェントです。
-あるセクションの本文作成に必要な情報を、決定論的収集で既に集めました。
-不足があれば追加で検索してください。
+指定セクションの本文作成に必要な情報を、決定論的収集で一部すでに集めてあります。
+あなたの仕事は、収集状況を観測し、不足を同定し、不足を埋める追加検索を1手だけ指示する
+ことです。本文は書きません。
 
 ## 対象セクション
 名前: {section_name}
 説明: {section_description}
 
-## 既に収集済みの情報（カテゴリと日付）
-{collected_summary}
+## 現在の収集状況（観測: カテゴリ別件数・収集済み日付）
+{coverage}
 
-## 医療記録に存在する全カテゴリ・全日付（検索可能な範囲）
+## 直近の検索結果（観測）
+{history}
+
+## すでに試したクエリ（同じものを繰り返さない。ゼロ件だった語は言い換える）
+{tried_queries}
+
+## 記録に存在する全カテゴリ・全日付（検索可能な範囲）
 カテゴリ: {available_categories}
 日付: {available_dates}
 
 ## 利用可能な検索ツール
-- keyword: 指定キーワードを含む記録を追加取得（例: 「酸素」「点滴」「転倒」）
-- date_range: 指定日付範囲の記録を追加取得（YYYYMMDD形式）
+- keyword: 指定語を含む記録を取得。固定の語では拾えない同義語・略語・言い換え・関連語を
+  使う（例: 「指導」で拾えなければ「説明」「教育」「パンフレット」「自己管理」）。
+- category: 指定カテゴリの記録を全件取得。収集済み以外のカテゴリに必要情報が埋まっている
+  可能性がある場合に使う（例: リスク情報が看護記録のS欄に、機器名が薬剤カテゴリにある等）。
+- date_range: 指定期間（YYYYMMDD形式）の記録を取得。特定期間が薄い場合に使う。
 
-## 指示
-このセクションに不足情報があるか判断してください。
-- 十分なら need_more=false。
-- 不足なら need_more=true とし、tool（keyword/date_range）と引数を指定してください。
-- 既に収集済みの情報で足りる場合は無理に検索しないでください。
+## 指示（観測 → 不足同定 → 1手の検索）
+1. satisfied_points: このセクションに必要で、すでに収集済みで満たされている情報項目を列挙。
+2. missing_points: このセクションに必要だが、まだ収集できていない情報項目を列挙。
+   収集済み以外のカテゴリに埋まっている可能性も検討する（カテゴリ越境）。
+3. missing_points が空なら need_more=false。残るなら need_more=true とし、その不足を
+   最もよく埋める tool を1つ選び引数を指定する。直近でゼロ件だったクエリは言い換える。
+4. reason: 何を期待して検索するか（または十分と判断した根拠）を簡潔に書く。
 
 ## 出力形式
 必ず次の JSON のみを出力する。説明文・コードフェンスは含めない。
-{{"need_more": true, "tool": "keyword", "keyword": "...", "reason": "..."}}
-または
-{{"need_more": false}}
+{{"satisfied_points": ["..."], "missing_points": ["..."],
+"need_more": true, "tool": "keyword", "keyword": "...",
+"category": "", "start_date": "", "end_date": "", "reason": "..."}}
+または十分な場合
+{{"satisfied_points": ["..."], "missing_points": [],
+"need_more": false, "reason": "..."}}
 """
 
 
