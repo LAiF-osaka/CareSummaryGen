@@ -58,6 +58,40 @@ reasoning には判断根拠、body にはセクション本文、cited_dates �
 {{"reasoning": "...", "body": "...", "cited_dates": ["YYYYMMDD"]}}
 """
 
+# --- section_worker: LLM補完検索（ハイブリッドの agentic 部分） ---
+SUPPLEMENT_PROMPT = """あなたは医療記録の検索エージェントです。
+あるセクションの本文作成に必要な情報を、決定論的収集で既に集めました。
+不足があれば追加で検索してください。
+
+## 対象セクション
+名前: {section_name}
+説明: {section_description}
+
+## 既に収集済みの情報（カテゴリと日付）
+{collected_summary}
+
+## 医療記録に存在する全カテゴリ・全日付（検索可能な範囲）
+カテゴリ: {available_categories}
+日付: {available_dates}
+
+## 利用可能な検索ツール
+- keyword: 指定キーワードを含む記録を追加取得（例: 「酸素」「点滴」「転倒」）
+- date_range: 指定日付範囲の記録を追加取得（YYYYMMDD形式）
+
+## 指示
+このセクションに不足情報があるか判断してください。
+- 十分なら need_more=false。
+- 不足なら need_more=true とし、tool（keyword/date_range）と引数を指定してください。
+- 既に収集済みの情報で足りる場合は無理に検索しないでください。
+
+## 出力形式
+必ず次の JSON のみを出力する。説明文・コードフェンスは含めない。
+{{"need_more": true, "tool": "keyword", "keyword": "...", "reason": "..."}}
+または
+{{"need_more": false}}
+"""
+
+
 # --- consistency: ドラフトの主張を分解 ---
 CONSISTENCY_PROMPT = """以下の看護サマリーから、検証可能な事実主張（atomic claim）を抽出してください。
 バイタル数値・投薬・日付・処置など、医療記録と照合できる具体的事実のみを対象とします。

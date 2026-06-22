@@ -17,6 +17,8 @@ def _mock_chat_json_single_pass(prompt, schema, **kwargs):
 
     プロンプト内容で呼び出し元を判別し、適切な構造化出力を返す。
     """
+    if "need_more" in str(schema):  # section_worker 補完検索
+        return {"need_more": False}
     if "claims" in str(schema):  # consistency
         return {"claims": ["2024年1月15日 BP 138/82 mmHg"]}
     if "sections" in str(schema):  # single_pass

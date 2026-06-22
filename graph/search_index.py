@@ -98,11 +98,11 @@ def collect(
     """
     mode = entry.get("mode", "extractive")
     if mode == "synthetic":
-        present = {
+        syn_present = {
             s["category_label"] for s in grep_index if s["category_label"]
         }
-        dates = sorted({s["date"] for s in grep_index})
-        return list(chunks), present, dates
+        syn_dates = sorted({s["date"] for s in grep_index})
+        return list(chunks), syn_present, syn_dates
 
     target_labels = resolve_category_labels(entry.get("categories", []))
     texts: list[str] = []
@@ -128,6 +128,43 @@ def collect(
                     present.add(span["category_label"])
 
     return texts, present, sorted(dates)
+
+
+def execute_search_tool(
+    tool: str, args: dict, grep_index: list[dict]
+) -> list[str]:
+    """LLM が選んだ検索ツールを決定論的に実行しスパン本文を返す。
+
+    ハイブリッド検索の補完ループ（agentic 部分）から呼ばれる。クエリ生成は
+    LLM、実行（grep）は決定論。サポートするツール:
+        keyword: args["keyword"] を含むスパン（部分文字列・小文字無視）
+        date_range: args["start_date"] <= date <= args["end_date"] のスパン
+
+    Args:
+        tool: "keyword" / "date_range"。
+        args: ツール引数（keyword / start_date / end_date）。
+        grep_index: explode_to_spans の出力。
+
+    Returns:
+        該当スパンの本文リスト（該当なし・未知ツールは空）。
+    """
+    if tool == "keyword":
+        keyword = str(args.get("keyword", "")).strip()
+        if not keyword:
+            return []
+        low = keyword.lower()
+        return [s["text"] for s in grep_index if low in s["text"].lower()]
+    if tool == "date_range":
+        start = str(args.get("start_date", "")).strip()
+        end = str(args.get("end_date", "")).strip()
+        if not start or not end:
+            return []
+        return [
+            s["text"]
+            for s in grep_index
+            if s.get("date") and start <= s["date"] <= end
+        ]
+    return []
 
 
 def absent_categories(entry: dict, present_labels: set[str]) -> list[str]:

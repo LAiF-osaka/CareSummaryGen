@@ -30,6 +30,53 @@ DB入力（`/ingest`）との接続は [db-input-design.md](db-input-design.md) 
 
 ---
 
+## 実装監査と用語修正（2026-04・重要）
+
+実装後の独立監査（Web調査＋実コード照合・2名）により、**本実装の検索ロジックは正準的な agentic search ではない**ことが判明した。正確には次のとおり:
+
+- Anthropic の定義（[Building Effective Agents](https://www.anthropic.com/research/building-effective-agents)）で agent =「LLM が実行時に自身のプロセスとツール使用を動的に駆動する」、workflow =「事前定義のコードパスで制御される」。本実装は**後者（workflow）**。
+- `collect()`（`graph/search_index.py`）は **LLM を使わない決定論関数**。検索クエリ（categories/keywords）は `routing.yaml` に**起動時固定**で、実行時に LLM が「何を検索するか」を決めず、結果を見て再検索もしない。
+- したがって「① 計画＝routing 事前定義」という従前の記述は**誤り**。routing は人手の静的設定であり、agentic search の planning（実行時 LLM 推論）ではない。実態は **「静的ルーティング → 決定論的全件収集 → LLM 生成 → 決定論的照合」のパイプライン**である。
+
+### エビデンスに基づく方針決定（フル agentic / ハイブリッド / 決定論）
+
+「gpt-oss 信頼性」「医療の網羅性」の2軸で一次情報を調査・比較した（コストは gpt-oss ローカルのため除外）。
+
+| 案 | gpt-oss 信頼性 | 医療網羅性 | 出典（代表） |
+|---|---|---|---|
+| **A. フル agentic** | 低: Ollama の tool call 破損（[#12203](https://github.com/ollama/ollama/issues/12203)）、Harmony 漏洩で早期終了、structured output 非互換（[LangChain #33116](https://github.com/langchain-ai/langchain/issues/33116)）、RL未学習は RAG 以下（[Search-R1](https://arxiv.org/abs/2503.09516)）、compound error 0.9¹⁰=35% | 低: 選択検索で completeness 低下、20chunk で薬剤32%欠落（[arXiv:2508.14817](https://arxiv.org/html/2508.14817v1)）、ED サマリ取りこぼし47%（[PMC12173386](https://pmc.ncbi.nlm.nih.gov/articles/PMC12173386/)） | 不可 |
+| **B. ハイブリッド** | 高: 120B 単発 tool call は高精度（[arXiv:2604.01235](https://arxiv.org/pdf/2604.01235)）、決定論ガードレールが cascade failure・無限ループを遮断 | 最高: 決定論チェックリストで必須フィールド +18.9〜21.6pt（[PMC12616335](https://pmc.ncbi.nlm.nih.gov/articles/PMC12616335/)）、構造化＋RAG で Recall +17.3pt（[MEDIQA-SYNUR](https://arxiv.org/html/2603.26046)） | **推奨** |
+| **C. 決定論（旧実装）** | 高（最高）: agentic ループ非搭載で破損経路ゼロ | 高（上限）: 必須カテゴリ全件収集は確実だが static 一回抽出は recall 低下、routing の穴が欠落に直結 | 次点 |
+
+**ベストプラクティスの根拠**: Anthropic は「構造が確定した反復タスクは workflow 側」「agent には停止条件・ガードレール・人間チェックポイントを併用」「間違いが高ステークスで検出困難なら自律性は負債」と明記。医療は高リスクで人間監督が義務化方向（[EU AI Act 第14条](https://artificialintelligenceact.eu/article/14/)・[FDA GMLP](https://www.fda.gov/media/153486/download)）。→ フル agentic を否定し、**決定論ガードレール付きハイブリッド**を支持。
+
+### ハイブリッド（B）設計
+
+旧 C を土台に、agentic の核（**クエリ生成と停止判断を LLM が動的に行う**）を、決定論ガードレールの内側に追加する（verifier-in-the-loop / guarded agent）。
+
+```
+section_worker（>閾値 / 欠損セクション経路）:
+  1. collect()                       # 決定論的全件収集（安全網・現行維持）
+  2. supplemental_search loop        # ← agentic 部分（新規）
+       for step in range(MAX_SEARCH_STEPS):              # ハード上限（フェイルセーフ）
+         decision = chat_json(SUPPLEMENT_PROMPT, schema) # LLM が動的にクエリ生成・継続判断
+         if not decision.need_more: break                # LLM の停止判断
+         new = execute_search(decision)                  # grep 決定論実行
+         if no new spans: break                          # 限界効用ゼロ（決定論ガードレール）
+         collected += new
+  3. _extract()                      # 生成（本文が空なら最大 MAX_REFILL 再試行）
+  4. absent_categories()             # 決定論的網羅点検（LLM 停止に依存しない・現行維持）
+```
+
+- **agentic な点**: 補完検索のクエリ（keyword / date_range）を LLM が動的生成し、停止も LLM が判断する。grep 実行は決定論（Claude Code と同じく「クエリは LLM・実行は決定論」）。
+- **決定論ガードレール**: ハード反復上限、新規スパンゼロ検出、`collect()` の全件収集（先行・安全網）、`absent_categories` の網羅点検（後行・LLM 停止に非依存）。
+- **フォールバック**: gpt-oss の構造化出力が失敗（`chat_json` が None）すれば補完ループをスキップし、決定論収集（C 相当）で続行する（グレースフル・フォールバック）。
+- `single_pass`（≤閾値）は全チャンクを供給するため補完検索は不要（最も網羅的）。補完検索は section_worker のみに適用。
+
+実装は §8 のスケッチを本設計で更新する。実行時フローの最新は [data-flow.md](data-flow.md) §3.3 を正とする。
+
+---
+
 ## 1. 設計判断: agentic search は本ユースケースに最適か
 
 ### 結論

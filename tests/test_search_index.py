@@ -1,6 +1,11 @@
-"""grep 索引・収集・欠落検出のテスト（v2、LLM不要）。"""
+"""grep 索引・収集・欠落検出・検索ツールのテスト（v2、LLM不要）。"""
 
-from graph.search_index import absent_categories, collect, explode_to_spans
+from graph.search_index import (
+    absent_categories,
+    collect,
+    execute_search_tool,
+    explode_to_spans,
+)
 
 
 def _db_chunks():
@@ -78,6 +83,33 @@ def test_collect_synthetic_returns_all_chunks():
     }
     texts, _present, _dates = collect(entry, spans, chunks)
     assert len(texts) == 2  # 全チャンク
+
+
+def test_execute_search_tool_keyword():
+    """補完検索の keyword ツールが該当スパン本文を返すこと。"""
+    chunks, index = _db_chunks()
+    spans = explode_to_spans(chunks, index)
+    results = execute_search_tool("keyword", {"keyword": "息苦しい"}, spans)
+    assert any("息苦しい" in r for r in results)
+
+
+def test_execute_search_tool_date_range():
+    """補完検索の date_range ツールが期間内スパンを返すこと。"""
+    chunks, index = _db_chunks()
+    spans = explode_to_spans(chunks, index)
+    results = execute_search_tool(
+        "date_range", {"start_date": "20230209", "end_date": "20230209"}, spans
+    )
+    assert results
+    assert all("37.8℃" in r or "息苦しい" in r for r in results)
+
+
+def test_execute_search_tool_unknown_returns_empty():
+    """未知ツール・空引数は空リストを返すこと。"""
+    chunks, index = _db_chunks()
+    spans = explode_to_spans(chunks, index)
+    assert execute_search_tool("bogus", {}, spans) == []
+    assert execute_search_tool("keyword", {"keyword": ""}, spans) == []
 
 
 def test_absent_categories_flags_missing():

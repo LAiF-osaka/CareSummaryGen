@@ -87,8 +87,8 @@
 
 ## 4. 設計上の確定事項
 
-- **検索はベクトル DB を使わない**。日付チャンク Markdown を `grep_index`（`{date, category_label, text}`）へ展開し、カテゴリ全件収集（top-k 制限なし）＋ keyword grep で収集する（決定論）。
-- **停止条件に LLM スコアを使わない**。section_worker は「本文が空なら最大 `MAX_REFILL` 回再抽出」、`absent_categories` で記録に無いカテゴリを欠落明示。
+- **検索はハイブリッド（決定論収集 ＋ LLM補完検索）**。ベクトル DB を使わず、`grep_index`（`{date, category_label, text}`）に対しカテゴリ全件収集（top-k 制限なし）＋ keyword grep で決定論収集（安全網）し、section_worker 内で LLM が不足を判断して追加検索クエリを動的生成する補完ループ（agentic 部分・`MAX_SEARCH_STEPS` 上限）を回す。正準的な agentic search（検索を全て LLM が駆動）ではなく、gpt-oss 信頼性と医療網羅性のエビデンスに基づくハイブリッド（[agentic-search-redesign.md](agentic-search-redesign.md) 参照）。
+- **網羅性は決定論ガードレールで保証**。`collect()` の全件収集が補完ループに先行（安全網）、`absent_categories` が後行で記録に無いカテゴリを欠落明示（LLM の停止判断に依存しない）。`chat_json` 失敗時は補完ループを飛ばし決定論モードへフォールバック。
 - **入力規模で経路を分ける**。`total_tokens ≤ SINGLE_PASS_TOKEN_THRESHOLD` は single_pass（1回生成）、超はセクション並列。
 - **テンプレートは YAML で外部化**。新機関は `templates/<id>.yaml` + `<id>.routing.yaml` の追加のみで対応（コード変更不要）。
 - **DB入力はカラム未確定でも動く**。`query_spec` を論理層（role）と retrieval 層（sql 等）に分離。`retrieval.sql` のバインド変数は `:patient_id` / `:encounter_id` のみ許可。

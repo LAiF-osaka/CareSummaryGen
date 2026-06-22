@@ -71,6 +71,9 @@ SINGLE_PASS_TOKEN_THRESHOLD: int = int(
 LARGE_NUM_CTX: int = int(os.environ.get("LARGE_NUM_CTX", "32768"))
 # section_worker 内部の refill 上限（決定論カウンタ）。
 MAX_REFILL: int = int(os.environ.get("MAX_REFILL", "1"))
+# section_worker のLLM補完検索ループの反復上限（ハイブリッドの agentic 部分・
+# 決定論ガードレール）。LLMが追加クエリを動的生成する回数の上限。
+MAX_SEARCH_STEPS: int = int(os.environ.get("MAX_SEARCH_STEPS", "2"))
 
 # --- LLM 共通オプション ---
 LLM_OPTIONS: dict = {

@@ -125,28 +125,29 @@ START
 - `ingest`: `load_template` / `load_routing`、`_extract_summary_header` で `summary_header`、`_build_search_index` で `chunks`、`explode_to_spans` で `grep_index`（`{date, category_label, text}`）、`tiktoken` で `total_tokens`。
 - `route_and_fanout`（`graph/edges/routing_v2.py`）: `total_tokens ≤ 閾値` → `single_pass`、超 → 全セクションを `Send` で並列。
 - `single_pass`: 全セクション + `summary_header` + 全 `chunks` を1プロンプトで `chat_json`（`think=False`, `num_ctx=LARGE_NUM_CTX`）。
-- `section_worker`: `collect`（カテゴリ全件収集・top-k 制限なし＋ keyword grep）→ `_extract`（`chat_json`）→ 本文が空なら最大 `MAX_REFILL` 回再試行（**LLM スコア不使用**）。`absent_categories` で記録に無いカテゴリを欠落明示。
+- `section_worker`: `collect`（決定論的全件収集）→ `supplemental_search`（LLM が不足判断＋追加クエリ動的生成・最大 `MAX_SEARCH_STEPS`）→ `_extract`（`chat_json`、本文が空なら最大 `MAX_REFILL` 回再試行）→ `absent_categories` で欠落明示（§3.3 ハイブリッド）。
 - `assemble`: `section_delimiter`（`--- {name} ---`）で決定論組立。空は `"記録なし（要確認）"`。
 - `consistency`: `chat_json` で claim 分解→主要トークンの過半が `grep_index`＋`summary_header` に含まれるか決定論照合。未支持を `review_flags`（自動修復しない）。
 - `finalize`: `final_summary = draft_summary`、`review_flag` 立ちセクションを集約。
 
-### 3.3 検索ロジック（agentic search / `graph/search_index.py`）
+### 3.3 検索ロジック（ハイブリッド: 決定論収集 ＋ LLM補完検索 / `graph/search_index.py`）
 
-#### agentic search とは
+#### 方式と用語の正確化
 
-LLM を中核に据え、「①どの情報を集めるか計画 → ②検索ツールで記録を収集 → ③生成 → ④結果を点検」を必要に応じて反復する検索方式。単一の検索で固定的に上位 k 件を返す従来の検索（RAG の1パス検索）と異なり、収集・生成・点検を分けて制御できる。本システムは Web 検索ではなく**1患者の医療記録**を対象とするため、ベクトル DB を使わず grep（部分文字列マッチ）で実装する。
+本システムの検索は **ハイブリッド** である。正準的な agentic search（実行時に LLM が全ての検索クエリ生成・評価・停止を駆動する。Anthropic の定義で agent）ではなく、**決定論的な全件収集を骨格（安全網）とし、その内側に LLM 駆動の補完検索ループ（agentic 部分）を、決定論ガードレールに囲んで持つ**構成である。この選択は gpt-oss の信頼性と医療の網羅性の2軸のエビデンスに基づく（[agentic-search-redesign.md](agentic-search-redesign.md) の「実装監査と用語修正」を参照）。
 
-#### 本システムでの agentic search の構成
+| 段階 | 実装 | LLM | 性質 |
+|---|---|---|---|
+| ① 決定論収集 | `collect()` … カテゴリ全件収集（top-k 制限なし）＋ keyword grep | なし | 安全網（必須カテゴリを悉皆で確保） |
+| ② LLM 補完検索ループ | `supplemental_search()` … LLM が不足を判断し追加クエリ（keyword / date_range）を**動的生成**、grep で実行、新規スパンを追加 | あり | agentic（クエリ生成と停止判断を LLM が行う。grep 実行は決定論） |
+| ③ 生成 | `single_pass` / `section_worker._extract`（LLM が本文を生成） | あり | — |
+| ④ 決定論点検 | `absent_categories`（記録に無いカテゴリを検出）、`consistency`（生成後に記録と照合） | なし(absent)/あり(claim分解) | 決定論ガードレール |
 
-| agentic search の段階 | 本システムの実装 |
-|---|---|
-| ① 計画（どのカテゴリ・キーワードを集めるか） | テンプレートの routing（`<id>.routing.yaml`）。セクションごとに `categories` / `keywords` / `mode` を事前定義 |
-| ② 収集（検索ツールで記録を集める） | `collect()` … カテゴリ全件収集（top-k 制限なし）＋ keyword grep（下記 (a)〜(c)） |
-| ③ 生成 | `single_pass` / `section_worker._extract`（LLM が本文を生成） |
-| ④ 点検 | `absent_categories`（記録に無いカテゴリを検出）、`consistency`（生成後に記録と照合） |
-| 反復 | `section_worker` は本文が空なら最大 `MAX_REFILL` 回、`single_pass` は欠損セクションのみ `section_worker` へ。**反復はすべて決定論カウンタで制御し、LLM スコアは使わない** |
+**決定論ガードレール**（②の暴走・gpt-oss 破損を遮断）: ハード反復上限 `MAX_SEARCH_STEPS`、新規スパンゼロ検出で停止、`collect()` の全件収集が②に先行（安全網）、`absent_categories` が②の後で網羅点検（LLM の停止判断に依存しない）。`chat_json` が失敗（None）すれば②を飛ばして①のみで続行する（グレースフル・フォールバック＝決定論モード）。
 
-以下は段階②（収集）の詳細。**ベクトル DB を使わず、grep（部分文字列マッチ）と決定論的なカテゴリ照合のみ**で行う。収集処理自体は LLM を使わない。
+`single_pass`（≤閾値）は全チャンクを供給するため②は不要。②は section_worker（>閾値 / 欠損セクション）のみに適用する。
+
+以下は段階①（決定論収集）の詳細。**ベクトル DB を使わず、grep（部分文字列マッチ）と決定論的なカテゴリ照合のみ**で行う。①自体は LLM を使わない。
 
 #### (a) grep 索引の構築 — `explode_to_spans(chunks, chunk_index)`（`ingest` で実行）
 
@@ -192,11 +193,31 @@ collect("medical_equipment") の例:
 
 routing が要求するが記録に存在しないカテゴリ（`target_labels − present_labels`）を返す。記録自体に無いカテゴリは grep しても得られないため、`section_worker` は欠落として `missing` に記録し `review_flag` を立てる（assemble で「記録なし（要確認）」、finalize で `review_flags`）。
 
+#### (e) LLM 補完検索ループ — `supplemental_search()`（section_worker 内・agentic 部分）
+
+①の決定論収集の後、LLM が「このセクションに不足情報があるか」を判断し、不足なら追加の検索クエリ（keyword または date_range）を**動的に生成**する。grep は決定論実行し、新規スパンを evidence に追加する。
+
+```python
+for step in range(MAX_SEARCH_STEPS):                 # ハード上限（フェイルセーフ）
+    decision = chat_json(SUPPLEMENT_PROMPT(section, 既収集の要約, 記録の地図), SCHEMA)
+    # decision = {"need_more": bool, "tool": "keyword"|"date_range"|"none", "keyword"/"start_date"/"end_date"}
+    if not decision["need_more"]:                     # ← LLM の停止判断（agentic）
+        break
+    new = execute_tool(decision, grep_index)          # grep 実行（決定論）
+    added = [s for s in new if s not in collected]
+    if not added:                                     # 限界効用ゼロ（決定論ガードレール）
+        break
+    collected += added
+```
+
+`chat_json` が失敗（None）した場合はループを抜け、①のみの決定論収集で続行する（グレースフル・フォールバック）。
+
 #### 設計上の要点
 
-- **検索ヒット依存からの脱却**: カテゴリ全件収集が主経路（該当カテゴリの行は全て渡す）。keyword grep はカテゴリ越境・未分類の補完。`max_results` のような件数上限を設けない。
+- **ハイブリッド**: ①決定論収集（安全網）＋②LLM補完検索（agentic）。クエリ生成と停止判断は LLM、grep 実行と網羅点検（`absent_categories`）は決定論。
+- **検索ヒット依存からの脱却**: カテゴリ全件収集が主経路（該当カテゴリの行は全て渡す）。`max_results` のような件数上限を設けない。②はそれを上乗せ補完するのみで、①の網羅を損なわない。
 - **患者横断情報の常時供給**: `summary_header`（アレルギー・感染症・看護問題等、§1.3）は検索に依存せず `single_pass` / `_extract` に常に渡る。
-- **決定論**: 収集・欠落判定は LLM・スコアを使わない純関数（`graph/search_index.py`）。
+- **決定論ガードレール**: 反復上限・新規スパンゼロ検出・収集の先行・欠落点検の後行により、②の LLM が早期停止/暴走しても網羅性は構造的に保たれる。
 
 ### 3.4 LLM 呼び出し（`llm/client.py`）
 
