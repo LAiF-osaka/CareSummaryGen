@@ -159,6 +159,29 @@ def test_gap_driven_stop_when_satisfied():
     assert not [t for t in trace if t.get("query")]
 
 
+def test_satisfied_stop_requires_explicit_gap_analysis():
+    """基準3(抜け道封鎖): missing_points 省略時は充足停止を認めないこと。
+
+    gpt-oss が gap 分析を省き need_more=false だけ返しても、gap 分析の明示
+    （missing_points キー）が無い限り needs_satisfied 停止させない。決定論
+    ガードレール（no_progress）で停止し、停止理由は needs_satisfied にならない。
+    """
+    scripted = _ScriptedLLM(
+        [
+            {"need_more": False},  # missing_points キー無し（gap分析省略）
+            {"need_more": False},  # 同上 → no_progress で停止
+        ]
+    )
+    with _patch(scripted):
+        _collected, trace = _supplemental_search(
+            _SECTION, _ENTRY, [], _spans()
+        )
+
+    # gap 分析無しの need_more=false では充足停止しない
+    assert trace[-1]["stop_reason"] != "needs_satisfied"
+    assert trace[-1]["stop_reason"] == "no_progress"
+
+
 def test_guardrail_caps_iterations():
     """基準4: need_more=true 連発でも MAX_SEARCH_STEPS で必ず停止すること。"""
     # 毎手 need_more=true で別カテゴリを取得し続ける（決して充足しない）

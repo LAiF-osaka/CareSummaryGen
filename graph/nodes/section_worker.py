@@ -51,7 +51,10 @@ _SUPPLEMENT_SCHEMA = {
         "end_date": {"type": "string"},
         "reason": {"type": "string"},
     },
-    "required": ["need_more"],
+    # missing_points を必須化し gap 分析の明示を強制する（充足停止の抜け道封鎖）。
+    # ローカル Ollama は grammar で強制、Cloud は _supplemental_search 側の
+    # キー存在ゲートで担保する（二重防御）。
+    "required": ["need_more", "missing_points"],
 }
 
 
@@ -182,9 +185,23 @@ def _supplemental_search(
             # 構造化出力失敗 → 決定論モードへフォールバック。
             stop_reason = "json_fail"
             break
+        # gap 分析の明示（missing_points キーの存在）を充足停止の前提にする。
+        # gpt-oss が gap 分析を省いて need_more=false だけ返した場合は充足停止
+        # を認めず、決定論ガードレール（no_progress）で停止させる（抜け道封鎖）。
+        gap_analyzed = "missing_points" in decision
         missing = [str(m) for m in decision.get("missing_points", []) if m]
-        if not decision.get("need_more") and not missing:
-            # gap 駆動の充足判定（missing 空かつ LLM が十分と判断）。
+        if gap_analyzed and not decision.get("need_more") and not missing:
+            # gap 駆動の充足判定（gap 分析済み・missing 空・LLM が十分と判断）。
+            satisfied = [
+                str(s) for s in decision.get("satisfied_points", []) if s
+            ]
+            trace.append(
+                {
+                    "step": step,
+                    "stop_reason": "needs_satisfied",
+                    "satisfied": satisfied,
+                }
+            )
             stop_reason = "needs_satisfied"
             break
 
