@@ -122,6 +122,26 @@ def test_execute_search_tool_category_empty():
     )
 
 
+def test_execute_search_tool_category_partial_match():
+    """部分一致フォールバックで表記揺れ（短縮ラベル）を吸収すること。"""
+    chunks, index = _db_chunks()
+    spans = explode_to_spans(chunks, index)
+    # 「看護」→「看護記録」に部分一致でフォールバック
+    results = execute_search_tool("category", {"category": "看護"}, spans)
+    assert any("息苦しい" in r for r in results)
+
+
+def test_execute_search_tool_category_normalized():
+    """正規化（全半角・空白）後の完全一致で揺れを吸収すること。"""
+    chunks, index = _db_chunks()
+    spans = explode_to_spans(chunks, index)
+    # 末尾空白・全角空白が混じってもバイタルサインに一致
+    results = execute_search_tool(
+        "category", {"category": "バイタル　サイン "}, spans
+    )
+    assert any("37.8℃" in r for r in results)
+
+
 def test_execute_search_tool_date_range():
     """補完検索の date_range ツールが期間内スパンを返すこと。"""
     chunks, index = _db_chunks()

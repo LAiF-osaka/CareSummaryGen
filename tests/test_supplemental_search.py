@@ -13,7 +13,11 @@ docs/agentic-search-redesign.md の「本物の agentic search」受入基準6�
 
 from unittest.mock import patch
 
-from graph.nodes.section_worker import _supplemental_search
+from graph.nodes.section_worker import (
+    _coverage_report,
+    _first_excerpt,
+    _supplemental_search,
+)
 from graph.search_index import explode_to_spans
 
 _SECTION = {"name": "看護記録", "description": "経過と観察", "key": "nursing"}
@@ -280,6 +284,25 @@ def test_graceful_fallback_on_json_failure():
     # 決定論収集は失われない（網羅性の下限保証）
     assert collected == initial
     assert trace[-1]["stop_reason"] == "json_fail"
+
+
+def test_coverage_report_includes_excerpt():
+    """観測の質: カバレッジに代表抜粋（内容行）が含まれること。"""
+    spans = _spans()
+    text_to_span = {s["text"]: s for s in spans}
+    collected = [s["text"] for s in spans if s["category_label"] == "看護記録"]
+    report = _coverage_report(collected, text_to_span)
+    assert "看護記録" in report
+    assert "件" in report
+    # 件数（量）だけでなく内容（質）の代表抜粋が付く
+    assert "例:" in report
+    assert "息苦しい" in report or "転倒" in report
+
+
+def test_first_excerpt_skips_headings():
+    """_first_excerpt が日付・カテゴリ見出しを飛ばし内容行を返すこと。"""
+    text = "- 20230209\n  - 看護記録\n    S: 息苦しい"
+    assert _first_excerpt(text) == "S: 息苦しい"
 
 
 def test_synthetic_skips_supplement():

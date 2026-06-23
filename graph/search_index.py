@@ -8,11 +8,22 @@
 """
 
 import re
+import unicodedata
 
 from templates_loader.routing import resolve_category_labels
 
 _DATE_LINE = re.compile(r"^- (\d{8})\s*$")
 _CATEGORY_LINE = re.compile(r"^  - (.+?)\s*$")
+
+
+def _normalize_label(label: str) -> str:
+    """カテゴリラベルを照合用に正規化する（全半角・空白の揺れを吸収）。"""
+    return (
+        unicodedata.normalize("NFKC", label)
+        .strip()
+        .replace(" ", "")
+        .replace("　", "")
+    )
 
 
 def explode_to_spans(chunks: list[str], chunk_index: list[dict]) -> list[dict]:
@@ -139,9 +150,10 @@ def execute_search_tool(
     LLM、実行（grep）は決定論。サポートするツール:
         keyword: args["keyword"] を含むスパン（部分文字列・小文字無視）。
             同義語・略語・言い換えの取りこぼし（語彙ミスマッチ）を埋める。
-        category: args["category"] とラベル完全一致するスパンを全件回収。
+        category: args["category"] とラベルが一致するスパンを全件回収。
             routing に静的定義されていないカテゴリを LLM が実行時に指定して
-            拾える（カテゴリ越境対策）。
+            拾える（カテゴリ越境対策）。正規化（全半角・空白）後の完全一致を
+            優先し、無ければ2文字以上で部分一致フォールバック（表記揺れ耐性）。
         date_range: args["start_date"] <= date <= args["end_date"] のスパン。
 
     Args:
@@ -162,11 +174,28 @@ def execute_search_tool(
         category = str(args.get("category", "")).strip()
         if not category:
             return []
-        # ラベル完全一致で該当カテゴリのスパンを全件回収する。
+        norm_q = _normalize_label(category)
+        # 正規化後の完全一致（全半角・空白の揺れを吸収）を優先。
+        exact = [
+            s["text"]
+            for s in grep_index
+            if s.get("category_label")
+            and _normalize_label(s["category_label"]) == norm_q
+        ]
+        if exact:
+            return exact
+        # 部分一致フォールバック（例: 「薬剤」→「薬剤・服薬」）。誤マッチ
+        # 回避のため2文字以上に限定し、いずれかが他方を包含する場合のみ。
+        if len(norm_q) < 2:
+            return []
         return [
             s["text"]
             for s in grep_index
-            if s.get("category_label") == category
+            if s.get("category_label")
+            and (
+                norm_q in _normalize_label(s["category_label"])
+                or _normalize_label(s["category_label"]) in norm_q
+            )
         ]
     if tool == "date_range":
         start = str(args.get("start_date", "")).strip()

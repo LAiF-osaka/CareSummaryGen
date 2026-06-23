@@ -283,19 +283,22 @@ def _coverage_report(
 ) -> str:
     """収集済み evidence のカバレッジを観測材料として整形する。
 
-    collected テキストを grep_index のスパンに引き戻し、category_label 別件数と
-    収集済み日付範囲を箇条書きで返す（決定論集計。LLM が「どこが薄いか」を見る）。
+    collected テキストを grep_index のスパンに引き戻し、category_label 別の
+    件数と代表抜粋、収集済み日付範囲を箇条書きで返す（決定論集計）。代表抜粋を
+    付すことで LLM が「どこが薄いか（量）」に加え「何が書かれているか（質）」を
+    観測でき、的確な不足同定・越境クエリ生成につなげる。
 
     Args:
         collected: 収集済み evidence テキスト。
         text_to_span: text→span の逆引き（カテゴリ・日付の復元用）。
 
     Returns:
-        カテゴリ別件数・日付範囲の箇条書き文字列。
+        カテゴリ別件数・代表抜粋・日付範囲の箇条書き文字列。
     """
     if not collected:
         return "（まだ何も収集していない）"
-    by_category: dict[str, int] = {}
+    # カテゴリ別の件数と代表抜粋（最初に出会ったスパンの内容行）を集計する。
+    by_category: dict[str, dict] = {}
     dates: set[str] = set()
     for text in collected:
         span = text_to_span.get(text)
@@ -304,15 +307,35 @@ def _coverage_report(
         else:
             # 補完取得スパンや label=None は別枠で件数を示す。
             label = "（カテゴリ未分類/補完取得）"
-        by_category[label] = by_category.get(label, 0) + 1
+        info = by_category.setdefault(label, {"count": 0, "excerpt": ""})
+        info["count"] += 1
+        if not info["excerpt"]:
+            info["excerpt"] = _first_excerpt(text)
         if span and span.get("date"):
             dates.add(span["date"])
-    lines = [f"- {cat}: {n}件" for cat, n in sorted(by_category.items())]
+    lines = []
+    for cat, info in sorted(by_category.items()):
+        excerpt = f"（例: {info['excerpt']}）" if info["excerpt"] else ""
+        lines.append(f"- {cat}: {info['count']}件{excerpt}")
     if dates:
         lines.append(
             f"- 収集済み日付: {min(dates)}〜{max(dates)}（{len(dates)}日分）"
         )
     return "\n".join(lines)
+
+
+def _first_excerpt(text: str, limit: int = 40) -> str:
+    """スパン本文から代表的な内容行を1行抜粋する（観測の質向上用）。
+
+    日付見出し（`- YYYYMMDD`）・カテゴリ見出し（`- ラベル`）行は飛ばし、最初の
+    内容行を limit 文字で切って返す。内容行が無ければ見出しを除いた先頭を返す。
+    """
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("- "):
+            continue  # 空行・見出し行（日付/カテゴリ）はスキップ
+        return stripped[:limit]
+    return text.strip().lstrip("-").strip()[:limit]
 
 
 def _format_history(trace: list[dict]) -> str:
