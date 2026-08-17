@@ -14,7 +14,13 @@ import re
 import httpx
 from ollama import ChatResponse, Client
 
-from config.settings import ENV, LLM_OPTIONS, MODEL_NAME, OLLAMA_BASE_URL
+from config.settings import (
+    ENV,
+    JSON_TEMPERATURE,
+    LLM_OPTIONS,
+    MODEL_NAME,
+    OLLAMA_BASE_URL,
+)
 
 
 def _build_client() -> Client:
@@ -42,7 +48,7 @@ def _build_client() -> Client:
             host=OLLAMA_BASE_URL,
             timeout=httpx.Timeout(
                 connect=30.0,
-                read=600.0,  # 120B モデルの生成待ち: 10分
+                read=600.0,  # ローカル大規模モデルの生成待ち: 10分
                 write=30.0,
                 pool=30.0,
             ),
@@ -69,8 +75,9 @@ def chat(
         system: システムプロンプト（オプション）。
         format_schema: 構造化出力用の JSON Schema（オプション）。
         temperature: 温度パラメータの上書き（オプション）。
-        think: 思考モード。gpt-oss では format と排他のため、構造化出力時は
-            False を指定して reasoning trace の混入を防ぐ（既定 False）。
+        think: 思考モード。gpt-oss は format と排他、Qwen3 系は既定で
+            thinking が有効なため、いずれのモデルでも構造化出力時は False を
+            指定して reasoning trace の混入を防ぐ（既定 False）。
         options_override: num_ctx 等をノード単位で上書きする辞書（オプション）。
 
     Returns:
@@ -184,9 +191,13 @@ def chat_json(
 ) -> dict | None:
     """構造化出力を堅牢に取得する（format + extract_json + bounded retry）。
 
-    gpt-oss は format 指定でも JSON 以外を混ぜることがあるため、
-    extract_json で抽出し、失敗時はエラー文を最新500字だけ付加して再試行する。
+    LLM は format 指定でも JSON 以外を混ぜることがあるため、extract_json で
+    抽出し、失敗時はエラー文を最新500字だけ付加して再試行する。
     Ollama Cloud では format が強制されないため retry が特に重要。
+
+    温度はモデル別プロファイルの `JSON_TEMPERATURE` を使う。gpt-oss は 0
+    （決定的）だが、Qwen 系は greedy decoding が公式に非推奨のため 0 より
+    大きい値になる（`config.model_profiles` 参照）。
 
     Args:
         prompt: ユーザープロンプト。
@@ -202,7 +213,7 @@ def chat_json(
         raw = chat(
             current,
             format_schema=schema,
-            temperature=0.0,
+            temperature=JSON_TEMPERATURE,
             think=False,
             options_override=options_override,
         )

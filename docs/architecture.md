@@ -17,7 +17,9 @@
 |---|---|
 | オーケストレーション | LangGraph（`StateGraph` + `Send` 並列） |
 | LLM 呼び出し | Ollama Python SDK（`llm/client.py`。LangChain 不使用） |
-| LLM モデル | gpt-oss:120b（`ENV=production`=ローカル / `ENV=test`=Ollama Cloud） |
+| LLM モデル | `.env` の `OLLAMA_MODEL` / `OLLAMA_MODEL_<ENV>` で切替（既定 gpt-oss:120b。`ENV=production`=ローカル / `ENV=test`=Ollama Cloud） |
+| モデル別チューニング | `config/model_profiles.py` の `resolve_profile()` がモデル名から `LLM_OPTIONS` と `JSON_TEMPERATURE` を解決 |
+| モデル比較 | `scripts/compare_models.py`（1 モデル 1 サブプロセスで同一入力を処理し `report.md` を出力） |
 | 構造化出力 | Pydantic スキーマ + `chat_json`（format + extract_json + retry） |
 | Web API | FastAPI（`/ask`, `/ingest`, `/templates`, `/`） |
 | DB取得 | SQLAlchemy（`adapters/sql_source.py`、query_spec 駆動） |

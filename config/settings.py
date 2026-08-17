@@ -3,14 +3,22 @@
 環境変数から設定を読み込み、アプリケーション全体で使用する定数を提供する。
 LLM パラメータ・チャンク分割・Reflection の上限などを一元管理する。
 
-環境切替:
-    ENV=production (デフォルト): ローカル Ollama + gpt-oss:120b（閉域ネットワーク）
-    ENV=test: Ollama Cloud + gpt-oss:120b-cloud（インターネット経由）
+環境切替（接続先）:
+    ENV=production (デフォルト): ローカル Ollama（閉域ネットワーク）
+    ENV=test: Ollama Cloud（インターネット経由）
+
+モデル切替:
+    `.env` の ``OLLAMA_MODEL`` / ``OLLAMA_MODEL_<ENV>`` を差し替えるだけで
+    使用モデルが切り替わる。サンプリングパラメータは `config.model_profiles`
+    がモデル名から自動解決するため、他のコード変更は不要。
+    例: OLLAMA_MODEL_PRODUCTION=qwen3.8:27b
 """
 
 import os
 
 import dotenv
+
+from config.model_profiles import resolve_profile
 
 dotenv.load_dotenv()
 
@@ -77,11 +85,11 @@ MAX_REFILL: int = int(os.environ.get("MAX_REFILL", "1"))
 # 数十サイクルは過剰）。reformulation の余地を確保するため既定 4。
 MAX_SEARCH_STEPS: int = int(os.environ.get("MAX_SEARCH_STEPS", "4"))
 
-# --- LLM 共通オプション ---
-LLM_OPTIONS: dict = {
-    "temperature": 0.1,
-    "top_p": 0.92,
-    "repeat_penalty": 1.2,
-    "num_ctx": 8192,
-    "num_predict": 4096,
-}
+# --- LLM オプション（モデル別プロファイルから解決） ---
+# MODEL_NAME からプロファイルを引くため、.env のモデル指定を差し替えるだけで
+# そのモデルの推奨サンプリングパラメータに切り替わる。
+_PROFILE = resolve_profile(MODEL_NAME)
+LLM_OPTIONS: dict = _PROFILE.options
+# 構造化出力（chat_json）で使う温度。Qwen 系のように greedy decoding が
+# 非推奨なモデルでは 0 より大きい値になる。
+JSON_TEMPERATURE: float = _PROFILE.json_temperature
