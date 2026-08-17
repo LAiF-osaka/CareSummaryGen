@@ -32,11 +32,14 @@ OLLAMA_MODEL_PRODUCTION=qwen3.8:27b
 OLLAMA_BASE_URL_PRODUCTION=http://localhost:11434
 ```
 
-| モデルファミリ | temperature | top_p | repeat_penalty | 構造化出力の温度 |
-|---|---|---|---|---|
-| `gpt-oss` | 0.1 | 0.92 | 1.2 | 0.0 |
-| `qwen3` 系（3.5 / 3.6 / 3.8） | 0.7 | 0.8 | 1.0 | 0.1 |
-| 未登録モデル | 0.2 | 0.9 | — | 0.1 |
+| モデルファミリ | temperature | top_p | top_k | repeat_penalty | 構造化出力の温度 |
+|---|---|---|---|---|---|
+| `gpt-oss` | 0.1 | 0.92 | — | 1.2 | 0.0 |
+| `qwen3` 系（3.5 / 3.6 / 3.8） | 0.7 | 0.8 | 20 | 1.0 | 0.1 |
+| `gemma` 系（3 / 4） | 1.0 | 0.95 | 64 | 1.0 | 0.1 |
+| 未登録モデル | 0.2 | 0.9 | — | — | 0.1 |
+
+`qwen3` 系は `presence_penalty=1.5` も併用する（公式の非思考モード推奨）。
 
 Qwen3 系は公式が「repetition_penalty の引き上げ」と「greedy decoding」を
 非推奨としているため、反復抑制は `presence_penalty` に委ね、構造化出力でも

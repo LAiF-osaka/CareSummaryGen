@@ -81,6 +81,21 @@ _QWEN3_PROFILE = ModelProfile(
     json_temperature=0.1,
 )
 
+# Gemma 系: 公式が全用途で共通の推奨値として提示している設定。
+# repeat_penalty は公式に指定がないため 1.0（実質無効）に据え置く。
+# 出典: https://ollama.com/library/gemma4
+_GEMMA_PROFILE = ModelProfile(
+    sampling={
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 64,
+        "repeat_penalty": 1.0,
+    },
+    # 温度1.0 を前提に調整されたモデルであり、温度0 での挙動が保証されない
+    # ため、構造化出力でも greedy を避ける。
+    json_temperature=0.1,
+)
+
 # モデルファミリ名 → プロファイル。
 # キーはモデル名のファミリ部分（"gpt-oss:120b-cloud" → "gpt-oss"）。
 MODEL_PROFILES: dict[str, ModelProfile] = {
@@ -89,6 +104,8 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
     "qwen3.6": _QWEN3_PROFILE,
     "qwen3.5": _QWEN3_PROFILE,
     "qwen3": _QWEN3_PROFILE,
+    "gemma4": _GEMMA_PROFILE,
+    "gemma3": _GEMMA_PROFILE,
 }
 
 # 未知モデル用のフォールバック。事実性重視の保守的な設定とし、

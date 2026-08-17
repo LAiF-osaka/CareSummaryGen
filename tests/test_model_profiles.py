@@ -48,6 +48,19 @@ class TestResolveProfile:
         """Qwen3 系は greedy decoding が非推奨のため温度0を使わない。"""
         assert resolve_profile("qwen3.8:27b").json_temperature > 0
 
+    @pytest.mark.parametrize(
+        "model_name", ["gemma4:cloud", "gemma4:31b-cloud", "gemma3:27b"]
+    )
+    def test_gemma_family_uses_official_recommended_sampling(self, model_name):
+        """Gemma 系は公式推奨（temp 1.0 / top_p 0.95 / top_k 64）になる。"""
+        profile = resolve_profile(model_name)
+        assert profile.sampling["temperature"] == 1.0
+        assert profile.sampling["top_p"] == 0.95
+        assert profile.sampling["top_k"] == 64
+        # 公式に repeat_penalty の指定がないため実質無効の 1.0。
+        assert profile.sampling["repeat_penalty"] == 1.0
+        assert profile.json_temperature > 0
+
     def test_unknown_model_falls_back_to_default(self):
         """未登録モデルは既定プロファイルにフォールバックする。"""
         assert resolve_profile("llama4:70b") is DEFAULT_PROFILE
